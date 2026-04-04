@@ -31,6 +31,13 @@ def _finite_diff(loss_fn, tensor, idx, eps=1e-3):
     return (fp - fm) / (2.0 * eps)
 
 
+def _assert_close_tensor(name: str, got: torch.Tensor, ref: torch.Tensor, atol: float, rtol: float):
+    max_abs = (got.float() - ref.float()).abs().max().item()
+    assert torch.allclose(got.float(), ref.float(), atol=atol, rtol=rtol), (
+        f"{name} mismatch: max_abs={max_abs:.4e}, atol={atol}, rtol={rtol}"
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_simamba_dcoeffs_match_finite_difference_with_midpoint():
     torch.manual_seed(0)
@@ -155,3 +162,142 @@ def test_simamba_dcoeffs_without_midpoint_returns_none_for_dmidpoint():
     assert ddt.shape == dt.shape
     assert dsimpson.shape == simpson.shape
     assert dmidpoint is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_simamba_dcoeffs_match_reference_autograd_full_tensor_with_midpoint():
+    torch.manual_seed(9)
+    device = "cuda"
+
+    batch, seqlen = 2, 6
+    nheads = 3
+    headdim_qk = 8
+    headdim_v = 6
+    n_angles = 4
+
+    q = torch.randn(batch, seqlen, nheads, headdim_qk, device=device, dtype=torch.float32)
+    k = torch.randn(batch, seqlen, nheads, headdim_qk, device=device, dtype=torch.float32)
+    v = torch.randn(batch, seqlen, nheads, headdim_v, device=device, dtype=torch.float32)
+    adt = -0.2 * torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+    dt = 0.01 + 0.2 * torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+    simpson = torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+    midpoint = torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+
+    q_bias = torch.randn(nheads, headdim_qk, device=device, dtype=torch.float32)
+    k_bias = torch.randn(nheads, headdim_qk, device=device, dtype=torch.float32)
+    angles = torch.randn(batch, seqlen, nheads, n_angles, device=device, dtype=torch.float32)
+    d = torch.randn(nheads, device=device, dtype=torch.float32)
+    z = torch.randn(batch, seqlen, nheads, headdim_v, device=device, dtype=torch.float32)
+    grad_out = torch.randn(batch, seqlen, nheads, headdim_v, device=device, dtype=torch.float32)
+
+    dadt, ddt, dsimpson, dmidpoint = compute_dcoeffs(
+        Q=q,
+        K=k,
+        V=v,
+        ADT=adt,
+        DT=dt,
+        Simpson=simpson,
+        Midpoint=midpoint,
+        Q_bias=q_bias,
+        K_bias=k_bias,
+        Angles=angles,
+        D=d,
+        Z=z,
+        grad_out=grad_out,
+    )
+    assert dmidpoint is not None
+
+    adt_ref = adt.detach().clone().requires_grad_(True)
+    dt_ref = dt.detach().clone().requires_grad_(True)
+    simpson_ref = simpson.detach().clone().requires_grad_(True)
+    midpoint_ref = midpoint.detach().clone().requires_grad_(True)
+
+    out_ref = simamba_siso_combined(
+        Q=q,
+        K=k,
+        V=v,
+        ADT=adt_ref,
+        DT=dt_ref,
+        Simpson=simpson_ref,
+        Midpoint=midpoint_ref,
+        Q_bias=q_bias,
+        K_bias=k_bias,
+        Angles=angles,
+        D=d,
+        Z=z,
+        return_final_states=False,
+    )
+    torch.autograd.backward(out_ref, grad_tensors=grad_out)
+
+    _assert_close_tensor("dADT", dadt, adt_ref.grad, atol=1e-1, rtol=2.5e-1)
+    _assert_close_tensor("dDT", ddt, dt_ref.grad, atol=1.2e-1, rtol=3.0e-1)
+    _assert_close_tensor("dSimpson", dsimpson, simpson_ref.grad, atol=1e-1, rtol=2.5e-1)
+    _assert_close_tensor("dMidpoint", dmidpoint, midpoint_ref.grad, atol=1e-1, rtol=2.5e-1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_simamba_dcoeffs_match_reference_autograd_full_tensor_without_midpoint():
+    torch.manual_seed(10)
+    device = "cuda"
+
+    batch, seqlen = 2, 6
+    nheads = 2
+    headdim_qk = 8
+    headdim_v = 6
+    n_angles = 4
+
+    q = torch.randn(batch, seqlen, nheads, headdim_qk, device=device, dtype=torch.float32)
+    k = torch.randn(batch, seqlen, nheads, headdim_qk, device=device, dtype=torch.float32)
+    v = torch.randn(batch, seqlen, nheads, headdim_v, device=device, dtype=torch.float32)
+    adt = -0.2 * torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+    dt = 0.01 + 0.2 * torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+    simpson = torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+
+    q_bias = torch.randn(nheads, headdim_qk, device=device, dtype=torch.float32)
+    k_bias = torch.randn(nheads, headdim_qk, device=device, dtype=torch.float32)
+    angles = torch.randn(batch, seqlen, nheads, n_angles, device=device, dtype=torch.float32)
+    d = torch.randn(nheads, device=device, dtype=torch.float32)
+    z = torch.randn(batch, seqlen, nheads, headdim_v, device=device, dtype=torch.float32)
+    grad_out = torch.randn(batch, seqlen, nheads, headdim_v, device=device, dtype=torch.float32)
+
+    dadt, ddt, dsimpson, dmidpoint = compute_dcoeffs(
+        Q=q,
+        K=k,
+        V=v,
+        ADT=adt,
+        DT=dt,
+        Simpson=simpson,
+        Midpoint=None,
+        Q_bias=q_bias,
+        K_bias=k_bias,
+        Angles=angles,
+        D=d,
+        Z=z,
+        grad_out=grad_out,
+    )
+    assert dmidpoint is None
+
+    adt_ref = adt.detach().clone().requires_grad_(True)
+    dt_ref = dt.detach().clone().requires_grad_(True)
+    simpson_ref = simpson.detach().clone().requires_grad_(True)
+
+    out_ref = simamba_siso_combined(
+        Q=q,
+        K=k,
+        V=v,
+        ADT=adt_ref,
+        DT=dt_ref,
+        Simpson=simpson_ref,
+        Midpoint=None,
+        Q_bias=q_bias,
+        K_bias=k_bias,
+        Angles=angles,
+        D=d,
+        Z=z,
+        return_final_states=False,
+    )
+    torch.autograd.backward(out_ref, grad_tensors=grad_out)
+
+    _assert_close_tensor("dADT(no_mid)", dadt, adt_ref.grad, atol=1e-1, rtol=2.5e-1)
+    _assert_close_tensor("dDT(no_mid)", ddt, dt_ref.grad, atol=1.2e-1, rtol=3.0e-1)
+    _assert_close_tensor("dSimpson(no_mid)", dsimpson, simpson_ref.grad, atol=1e-1, rtol=2.5e-1)
