@@ -1,9 +1,25 @@
 """Simamba Triton SISO forward parity tests."""
 
+import sys
+import types
+from pathlib import Path
+
 import pytest
 import torch
 
+# Avoid importing mamba_ssm/__init__.py during these focused kernel tests,
+# which otherwise requires the compiled selective_scan_cuda extension.
+if "selective_scan_cuda" not in sys.modules:
+    sys.modules["selective_scan_cuda"] = types.ModuleType("selective_scan_cuda")
+
+if "mamba_ssm" not in sys.modules:
+    repo_root = Path(__file__).resolve().parents[3]
+    pkg = types.ModuleType("mamba_ssm")
+    pkg.__path__ = [str(repo_root / "mamba_ssm")]
+    sys.modules["mamba_ssm"] = pkg
+
 from mamba_ssm.ops.triton.simamba.mamba3_siso_fwd import mamba3_siso_fwd
+from mamba_ssm.ops.triton.simamba.mamba3_siso_step import mamba3_siso_step
 from mamba_ssm.ops.triton.simamba.simamba_siso_combined import simamba_siso_combined
 
 
@@ -179,3 +195,94 @@ def test_simamba_triton_forward_varlen_matches_reference():
     assert (ref_final[3].float() - final_tri[3].float()).abs().max().item() < 6e-2
     assert (ref_final[4].float() - final_tri[4].float()).abs().max().item() < 6e-2
     assert (ref_final[5].float() - final_tri[5].float()).abs().max().item() < 6e-2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_simamba_triton_prefill_step_decode_parity():
+    torch.manual_seed(777)
+    device = "cuda"
+
+    batch = 2
+    seqlen = 9
+    prefill_len = 4
+    nheads_qk = 2
+    nheads = 4
+    headdim_qk = 8
+    headdim_v = 8
+    n_angles = 4
+
+    q = torch.randn(batch, seqlen, nheads_qk, headdim_qk, device=device, dtype=torch.bfloat16)
+    k = torch.randn(batch, seqlen, nheads_qk, headdim_qk, device=device, dtype=torch.bfloat16)
+    v = torch.randn(batch, seqlen, nheads, headdim_v, device=device, dtype=torch.bfloat16)
+
+    adt = -0.2 * torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+    dt = 0.01 + 0.2 * torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+    simpson = torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+    midpoint = torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+
+    q_bias = torch.randn(nheads, headdim_qk, device=device, dtype=torch.float32)
+    k_bias = torch.randn(nheads, headdim_qk, device=device, dtype=torch.float32)
+    angles = torch.randn(batch, seqlen, nheads, n_angles, device=device, dtype=torch.float32)
+
+    d = torch.randn(nheads, device=device, dtype=torch.float32)
+    z = torch.randn(batch, seqlen, nheads, headdim_v, device=device, dtype=torch.bfloat16)
+
+    full = mamba3_siso_fwd(
+        Q=q,
+        K=k,
+        V=v,
+        ADT=adt,
+        DT=dt,
+        Simpson=simpson,
+        Midpoint=midpoint,
+        Q_bias=q_bias,
+        K_bias=k_bias,
+        Angles=angles,
+        D=d,
+        Z=z,
+        return_final_states=False,
+    )
+    out_full = full[0]
+
+    prefill = mamba3_siso_fwd(
+        Q=q[:, :prefill_len],
+        K=k[:, :prefill_len],
+        V=v[:, :prefill_len],
+        ADT=adt[:, :, :prefill_len],
+        DT=dt[:, :, :prefill_len],
+        Simpson=simpson[:, :, :prefill_len],
+        Midpoint=midpoint[:, :, :prefill_len],
+        Q_bias=q_bias,
+        K_bias=k_bias,
+        Angles=angles[:, :prefill_len],
+        D=d,
+        Z=z[:, :prefill_len],
+        return_final_states=True,
+    )
+    out_prefill = prefill[0]
+    states = prefill[-1]
+    assert states is not None
+
+    decode_chunks = []
+    for t in range(prefill_len, seqlen):
+        out_t, states = mamba3_siso_step(
+            Q=q[:, t],
+            K=k[:, t],
+            V=v[:, t],
+            ADT=adt[:, :, t],
+            DT=dt[:, :, t],
+            Simpson=simpson[:, :, t],
+            Midpoint=midpoint[:, :, t],
+            Q_bias=q_bias,
+            K_bias=k_bias,
+            Angles=angles[:, t],
+            D=d,
+            Z=z[:, t],
+            Input_States=states,
+        )
+        decode_chunks.append(out_t.unsqueeze(1))
+
+    out_decode = torch.cat(decode_chunks, dim=1)
+    out_rollout = torch.cat([out_prefill, out_decode], dim=1)
+
+    assert (out_full.float() - out_rollout.float()).abs().max().item() < 6e-2
