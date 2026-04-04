@@ -1,0 +1,181 @@
+"""Simamba Triton SISO forward parity tests."""
+
+import pytest
+import torch
+
+from mamba_ssm.ops.triton.simamba.mamba3_siso_fwd import mamba3_siso_fwd
+from mamba_ssm.ops.triton.simamba.simamba_siso_combined import simamba_siso_combined
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_simamba_triton_forward_matches_reference_with_midpoint():
+    torch.manual_seed(123)
+    device = "cuda"
+
+    batch, seqlen = 2, 8
+    nheads = 4
+    headdim_qk = 8
+    headdim_v = 8
+    n_angles = 4
+
+    q = torch.randn(batch, seqlen, nheads, headdim_qk, device=device, dtype=torch.bfloat16)
+    k = torch.randn(batch, seqlen, nheads, headdim_qk, device=device, dtype=torch.bfloat16)
+    v = torch.randn(batch, seqlen, nheads, headdim_v, device=device, dtype=torch.bfloat16)
+
+    adt = -0.2 * torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+    dt = 0.01 + 0.2 * torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+    simpson = torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+    midpoint = torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)
+
+    q_bias = torch.randn(nheads, headdim_qk, device=device, dtype=torch.float32)
+    k_bias = torch.randn(nheads, headdim_qk, device=device, dtype=torch.float32)
+    angles = torch.randn(batch, seqlen, nheads, n_angles, device=device, dtype=torch.float32)
+
+    d = torch.randn(nheads, device=device, dtype=torch.float32)
+    z = torch.randn(batch, seqlen, nheads, headdim_v, device=device, dtype=torch.bfloat16)
+
+    ref = simamba_siso_combined(
+        Q=q,
+        K=k,
+        V=v,
+        ADT=adt,
+        DT=dt,
+        Simpson=simpson,
+        Midpoint=midpoint,
+        Q_bias=q_bias,
+        K_bias=k_bias,
+        Angles=angles,
+        D=d,
+        Z=z,
+        return_final_states=True,
+    )
+
+    tri = mamba3_siso_fwd(
+        Q=q,
+        K=k,
+        V=v,
+        ADT=adt,
+        DT=dt,
+        Simpson=simpson,
+        Midpoint=midpoint,
+        Q_bias=q_bias,
+        K_bias=k_bias,
+        Angles=angles,
+        D=d,
+        Z=z,
+        return_final_states=True,
+    )
+
+    out_ref = ref[0].float()
+    out_tri = tri[0].float()
+    assert (out_ref - out_tri).abs().max().item() < 5e-2
+
+    final_ref = ref[1:]
+    final_tri = tri[-1]
+    assert final_tri is not None
+
+    assert (final_ref[0].float() - final_tri[0].float()).abs().max().item() < 5e-3
+    assert (final_ref[1].float() - final_tri[1].float()).abs().max().item() < 8e-2
+    assert (final_ref[2].float() - final_tri[2].float()).abs().max().item() < 5e-2
+    assert (final_ref[3].float() - final_tri[3].float()).abs().max().item() < 5e-2
+    assert (final_ref[4].float() - final_tri[4].float()).abs().max().item() < 5e-2
+    assert (final_ref[5].float() - final_tri[5].float()).abs().max().item() < 5e-2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_simamba_triton_forward_varlen_matches_reference():
+    torch.manual_seed(321)
+    device = "cuda"
+
+    batch = 1
+    nheads_qk = 2
+    nheads = 4
+    headdim_qk = 8
+    headdim_v = 8
+    n_angles = 4
+    cu_seqlens = torch.tensor([0, 3, 7, 10], device=device, dtype=torch.int32)
+    total_seqlen = int(cu_seqlens[-1].item())
+    num_sequences = cu_seqlens.numel() - 1
+
+    q = torch.randn(batch, total_seqlen, nheads_qk, headdim_qk, device=device, dtype=torch.bfloat16)
+    k = torch.randn(batch, total_seqlen, nheads_qk, headdim_qk, device=device, dtype=torch.bfloat16)
+    v = torch.randn(batch, total_seqlen, nheads, headdim_v, device=device, dtype=torch.bfloat16)
+
+    adt = -0.2 * torch.rand(batch, nheads, total_seqlen, device=device, dtype=torch.float32)
+    dt = 0.01 + 0.2 * torch.rand(batch, nheads, total_seqlen, device=device, dtype=torch.float32)
+    simpson = torch.rand(batch, nheads, total_seqlen, device=device, dtype=torch.float32)
+    midpoint = torch.rand(batch, nheads, total_seqlen, device=device, dtype=torch.float32)
+
+    q_bias = torch.randn(nheads, headdim_qk, device=device, dtype=torch.float32)
+    k_bias = torch.randn(nheads, headdim_qk, device=device, dtype=torch.float32)
+    angles = torch.randn(batch, total_seqlen, nheads, n_angles, device=device, dtype=torch.float32)
+
+    d = torch.randn(nheads, device=device, dtype=torch.float32)
+    z = torch.randn(batch, total_seqlen, nheads, headdim_v, device=device, dtype=torch.bfloat16)
+
+    init_states = (
+        torch.randn(num_sequences, nheads, n_angles, device=device, dtype=torch.float32),
+        torch.randn(num_sequences, nheads, headdim_v, headdim_qk, device=device, dtype=torch.float32),
+        torch.randn(num_sequences, nheads, headdim_qk, device=device, dtype=torch.bfloat16),
+        torch.randn(num_sequences, nheads, headdim_qk, device=device, dtype=torch.bfloat16),
+        torch.randn(num_sequences, nheads, headdim_v, device=device, dtype=torch.bfloat16),
+        torch.randn(num_sequences, nheads, headdim_v, device=device, dtype=torch.bfloat16),
+    )
+
+    ref_out = torch.empty((batch, total_seqlen, nheads, headdim_v), device=device, dtype=torch.bfloat16)
+    ref_final = [[], [], [], [], [], []]
+    for seq_idx in range(num_sequences):
+        start = int(cu_seqlens[seq_idx].item())
+        end = int(cu_seqlens[seq_idx + 1].item())
+        seq_states = tuple(s[seq_idx : seq_idx + 1] for s in init_states)
+        ref = simamba_siso_combined(
+            Q=q[:, start:end],
+            K=k[:, start:end],
+            V=v[:, start:end],
+            ADT=adt[:, :, start:end],
+            DT=dt[:, :, start:end],
+            Simpson=simpson[:, :, start:end],
+            Midpoint=midpoint[:, :, start:end],
+            Q_bias=q_bias,
+            K_bias=k_bias,
+            Angles=angles[:, start:end],
+            D=d,
+            Z=z[:, start:end],
+            Input_States=seq_states,
+            return_final_states=True,
+        )
+        ref_out[:, start:end] = ref[0]
+        for i in range(6):
+            ref_final[i].append(ref[1 + i])
+
+    ref_final = tuple(torch.cat(parts, dim=0) for parts in ref_final)
+
+    tri = mamba3_siso_fwd(
+        Q=q,
+        K=k,
+        V=v,
+        ADT=adt,
+        DT=dt,
+        Simpson=simpson,
+        Midpoint=midpoint,
+        Q_bias=q_bias,
+        K_bias=k_bias,
+        Angles=angles,
+        D=d,
+        Z=z,
+        Initial_States=init_states,
+        return_final_states=True,
+        cu_seqlens=cu_seqlens,
+    )
+
+    out_tri = tri[0]
+    final_tri = tri[-1]
+    assert final_tri is not None
+
+    assert (ref_out.float() - out_tri.float()).abs().max().item() < 6e-2
+    assert (ref_final[0].float() - final_tri[0].float()).abs().max().item() < 1e-2
+    assert (ref_final[1].float() - final_tri[1].float()).abs().max().item() < 9e-2
+    assert (ref_final[2].float() - final_tri[2].float()).abs().max().item() < 6e-2
+    assert (ref_final[3].float() - final_tri[3].float()).abs().max().item() < 6e-2
+    assert (ref_final[4].float() - final_tri[4].float()).abs().max().item() < 6e-2
+    assert (ref_final[5].float() - final_tri[5].float()).abs().max().item() < 6e-2
