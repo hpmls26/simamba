@@ -541,23 +541,17 @@ def mamba3_siso_bwd_kernel_dqkv(
         )
 
         # dQK_dot = sum_v(dO * V) for each position
-        dQK_dot_block = tl.dot(
-            dO_reloaded * v_block_reloaded,
-            tl.full([HEADDIM_V, 1], 1, dtype=dO_reloaded.dtype)
-        )
+        dQK_dot_block = tl.sum(dO_reloaded * v_block_reloaded, axis=1)
 
         tl.store(
             dQK_Dot + dQK_dot_offset + offs_cs * stride_dQK_dot_seqlen,
-            dQK_dot_block.reshape(CHUNK_SIZE),
+            dQK_dot_block,
             mask=seq_mask
         )
 
         # Accumulate dD gradient
         if D is not None:
-            dD_acc += tl.dot(
-                tl.full([1, CHUNK_SIZE], 1, dtype=tl.float32),
-                dQK_dot_block
-            ).reshape(1)
+            dD_acc += tl.sum(dQK_dot_block).reshape(1)
 
         # ============================================================
         # Compute dADT Gradient (Part 2): From Inter-chunk States

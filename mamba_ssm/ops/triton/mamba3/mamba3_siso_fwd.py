@@ -296,11 +296,9 @@ def mamba3_siso_fwd_kernel(
         k_pre_block += k_bias_block[None, :]
 
         # Compute QK dot products for skip connection
-        store_qk_dot = tl.dot(
-            q_pre_block * k_pre_block,
-            tl.full([HEADDIM_QK, 1], 1, dtype=q_pre_block.dtype)
-        ).to(q_pre_block.dtype)
-        store_qk_dot = store_qk_dot.reshape(CHUNK_SIZE)
+        # Triton dot() expects matrix multiply sizes >= 16; use a reduction for
+        # per-token inner products instead of a [K, 1] matmul.
+        store_qk_dot = tl.sum(q_pre_block * k_pre_block, axis=1).to(q_pre_block.dtype)
         store_qk_dot *= gamma
         tl.store(qk_store_ptr + offs_seqlen * stride_qk_store_seqlen, store_qk_dot, mask=offs_seqlen < seqlen)
         
@@ -321,14 +319,14 @@ def mamba3_siso_fwd_kernel(
                 mask=(offs_hd[None, :] < headdim_qk))
             
         k_pre_block *= scale[:, None]
-        k_store_desc.store([chunk_start, 0], k_pre_block)
+        k_store_desc.store([chunk_start, 0], k_pre_block.to(k_store_desc.dtype))
 
         # Apply rotary embeddings to Q
         q0, q1 = tl.split(tl.reshape(q_pre_block, [CHUNK_SIZE, HEADDIM_QK // 2, 2]))
         qo0 = q0 * cos_block - q1 * sin_block
         qo1 = q0 * sin_block + q1 * cos_block
         q_pre_block = tl.reshape(tl.join(qo0, qo1), [CHUNK_SIZE, HEADDIM_QK]).to(q_pre_block.dtype)
-        q_store_desc.store([chunk_start, 0], q_pre_block)
+        q_store_desc.store([chunk_start, 0], q_pre_block.to(q_store_desc.dtype))
 
     # Phase 2: Main computation and output generation.
     if HAS_INITIAL_STATES:
@@ -411,7 +409,7 @@ def mamba3_siso_fwd_kernel(
             acc_o = acc_o * silu(z_block.to(tl.float32))
 
         # Store output
-        o_desc.store([chunk_start, 0], acc_o)
+        o_desc.store([chunk_start, 0], acc_o.to(o_desc.dtype))
 
         if STORE_SSM_STATES_ADT_OUTV:
             ssm_states_desc.store([0, chunk_idx * headdim_qk], acc_ssm_states.to(ssm_states_desc.dtype))
