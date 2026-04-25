@@ -1,10 +1,16 @@
 #!/usr/bin/env python
 
 import argparse
+import time
 from pathlib import Path
 
 import numpy as np
 from transformers import AutoTokenizer
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
 
 
 def parse_args():
@@ -28,12 +34,19 @@ def main():
     from datasets import load_dataset
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    print("[prepare] Starting SlimPajama sample preparation", flush=True)
+    print(f"[prepare] output_dir={args.output_dir}", flush=True)
+    print(f"[prepare] dataset={args.dataset_name} split={args.dataset_split}", flush=True)
+    print(f"[prepare] tokenizer={args.tokenizer}", flush=True)
+    print(f"[prepare] train_tokens={args.train_tokens} val_tokens={args.val_tokens}", flush=True)
+    print(f"[prepare] shuffle_buffer={args.shuffle_buffer} seed={args.seed}", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     eos_id = tokenizer.eos_token_id
     if eos_id is None:
         raise ValueError(f"Tokenizer {args.tokenizer} has no eos_token_id.")
 
     total_tokens = args.train_tokens + args.val_tokens
+    print(f"[prepare] total_target_tokens={total_tokens}", flush=True)
     dataset = load_dataset(
         args.dataset_name,
         args.dataset_config,
@@ -41,6 +54,7 @@ def main():
         streaming=True,
     )
     dataset = dataset.shuffle(seed=args.seed, buffer_size=args.shuffle_buffer)
+    print("[prepare] Dataset stream opened and shuffled", flush=True)
 
     all_tokens = np.memmap(
         args.output_dir / "all_tokens.uint16.bin",
@@ -48,9 +62,12 @@ def main():
         dtype=np.uint16,
         shape=(total_tokens,),
     )
+    print(f"[prepare] Writing temporary token buffer to {args.output_dir / 'all_tokens.uint16.bin'}", flush=True)
 
     cursor = 0
     docs = 0
+    start_time = time.time()
+    pbar = tqdm(total=total_tokens, unit="tok", desc="tokenizing", dynamic_ncols=True) if tqdm is not None else None
     for example in dataset:
         text = example.get("text")
         if not text:
@@ -67,18 +84,35 @@ def main():
         all_tokens[cursor : cursor + len(chunk)] = chunk
         cursor += len(chunk)
         docs += 1
-        if docs % 1000 == 0:
-            print(f"docs={docs} tokens={cursor}/{total_tokens}", flush=True)
+        if pbar is not None:
+            pbar.update(len(chunk))
+        elif docs % 100 == 0:
+            elapsed = max(time.time() - start_time, 1e-6)
+            toks_per_sec = cursor / elapsed
+            print(
+                f"[prepare] docs={docs} tokens={cursor}/{total_tokens} "
+                f"({cursor / total_tokens:.1%}) toks_per_sec={toks_per_sec:.0f}",
+                flush=True,
+            )
 
     if cursor < total_tokens:
         raise RuntimeError(f"Only collected {cursor} tokens, expected {total_tokens}.")
 
+    if pbar is not None:
+        pbar.close()
+    elapsed = max(time.time() - start_time, 1e-6)
+    print(
+        f"[prepare] Tokenization complete: docs={docs} tokens={cursor} "
+        f"elapsed_s={elapsed:.1f} toks_per_sec={cursor / elapsed:.0f}",
+        flush=True,
+    )
     all_tokens.flush()
     del all_tokens
 
     data = np.memmap(args.output_dir / "all_tokens.uint16.bin", mode="r", dtype=np.uint16, shape=(total_tokens,))
     train = np.memmap(args.output_dir / "train.bin", mode="w+", dtype=np.uint16, shape=(args.train_tokens,))
     val = np.memmap(args.output_dir / "val.bin", mode="w+", dtype=np.uint16, shape=(args.val_tokens,))
+    print("[prepare] Splitting train.bin and val.bin", flush=True)
     train[:] = data[: args.train_tokens]
     val[:] = data[args.train_tokens :]
     train.flush()
@@ -99,7 +133,10 @@ def main():
         )
         + "\n"
     )
-    print(f"Wrote {args.output_dir / 'train.bin'} and {args.output_dir / 'val.bin'}", flush=True)
+    print(f"[prepare] wrote {args.output_dir / 'train.bin'}", flush=True)
+    print(f"[prepare] wrote {args.output_dir / 'val.bin'}", flush=True)
+    print(f"[prepare] wrote {args.output_dir / 'meta.txt'}", flush=True)
+    print("[prepare] Done", flush=True)
 
 
 if __name__ == "__main__":
