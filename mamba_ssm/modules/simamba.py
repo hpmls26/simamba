@@ -422,6 +422,14 @@ class Simamba(nn.Module):
                     v_prev1_state,
                     v_prev2_state,
                 ),
+                Output_States=(
+                    angle_state,
+                    ssm_state,
+                    k_prev1_state,
+                    k_prev2_state,
+                    v_prev1_state,
+                    v_prev2_state,
+                ),
                 D=self.D,
                 Z=z if not self.is_outproj_norm else None,
             )
@@ -442,17 +450,23 @@ class Simamba(nn.Module):
 
         out = self.out_proj(y.to(x.dtype))
 
-        angle_state.copy_(nxt_angle_state)
-        ssm_state.copy_(nxt_ssm_state)
-        k_prev1_state.copy_(nxt_k_prev1_state)
-        k_prev2_state.copy_(nxt_k_prev2_state)
-        v_prev1_state.copy_(nxt_v_prev1_state)
-        v_prev2_state.copy_(nxt_v_prev2_state)
+        if nxt_angle_state is not angle_state:
+            angle_state.copy_(nxt_angle_state)
+        if nxt_ssm_state is not ssm_state:
+            ssm_state.copy_(nxt_ssm_state)
+        if nxt_k_prev1_state is not k_prev1_state:
+            k_prev1_state.copy_(nxt_k_prev1_state)
+        if nxt_k_prev2_state is not k_prev2_state:
+            k_prev2_state.copy_(nxt_k_prev2_state)
+        if nxt_v_prev1_state is not v_prev1_state:
+            v_prev1_state.copy_(nxt_v_prev1_state)
+        if nxt_v_prev2_state is not v_prev2_state:
+            v_prev2_state.copy_(nxt_v_prev2_state)
 
         return (
             out,
             nxt_angle_state,
-            ssm_state,
+            nxt_ssm_state,
             nxt_k_prev1_state,
             nxt_k_prev2_state,
             nxt_v_prev1_state,
