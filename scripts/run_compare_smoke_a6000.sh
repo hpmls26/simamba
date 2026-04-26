@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 #SBATCH --account=edu
+#SBATCH --partition=burst
 #SBATCH --job-name=SimambaSmokeCompare
 #SBATCH --output=/insomnia001/home/ssb2234/logs/%x-%j.out
 #SBATCH --error=/insomnia001/home/ssb2234/logs/%x-%j.err
-#SBATCH --gres=gpu:1
-#SBATCH -c 4
+#SBATCH --gres=gpu:A6000:1
+#SBATCH -c 1
 #SBATCH --time=0-06:00
-#SBATCH --mem-per-cpu=8G
+#SBATCH --mem-per-cpu=4G
 
 set -euo pipefail
 
@@ -15,10 +16,13 @@ set -euo pipefail
 # to get comparable traces without destroying throughput via GPU contention.
 #
 # Usage:
-#   export WANDB_API_KEY='...'
-#   export WANDB_ENTITY='ssb2234-columbia'
-#   export WANDB_PROJECT='simamba'
+WANDB_API_KEY='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'
+WANDB_ENTITY='ssb2234-columbia'
+WANDB_PROJECT='simamba'
 #   bash scripts/run_compare_smoke_a6000.sh /path/data_dir /path/output_root
+# Submission:
+#   sbatch scripts/run_compare_smoke_a6000.sh
+#   sbatch --partition=burst --gres=gpu:A6000:1 scripts/run_compare_smoke_a6000.sh  # explicit override
 
 DEFAULT_DATA_DIR="/insomnia001/home/ssb2234/slimpajama_smoke"
 DEFAULT_OUT_ROOT="/insomnia001/home/ssb2234/simamba_compare_smoke"

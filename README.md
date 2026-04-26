@@ -26,13 +26,17 @@ with an efficient hardware-aware design and implementation in the spirit of [Fla
 ## Installation
 
 Install PyTorch first, then:
-- [Option] `pip install causal-conv1d>=1.4.0 --no-build-isolation`: an efficient implementation of a simple causal Conv1d layer used inside the Mamba block.
-- `pip install mamba-ssm --no-build-isolation`: the core Mamba package.
-- `pip install mamba-ssm[causal-conv1d] --no-build-isolation`: To install core Mamba package and causal-conv1d.
+- `pip install mamba-ssm --no-build-isolation`: the core package with the common Python dependencies only.
+- `pip install mamba-ssm[causal-conv1d] --no-build-isolation`: core package plus optional `causal-conv1d`.
+- `pip install mamba-ssm[triton] --no-build-isolation`: core package plus Triton kernels.
+- `pip install mamba-ssm[mamba3] --no-build-isolation`: core package plus the extra dependencies required for Mamba-3 kernels.
+- `pip install mamba-ssm[full] --no-build-isolation`: install all optional runtime extras.
 
 `--no-build-isolation` is required so that pip uses your existing CUDA-enabled PyTorch instead of installing torch-cpu in an isolated build environment.
 
 NOTE: To use Mamba-3, please install from source `MAMBA_FORCE_BUILD=TRUE pip install --no-cache-dir --force-reinstall git+https://github.com/state-spaces/mamba.git --no-build-isolation`.
+
+If you are packaging from a local checkout for environments like Google Colab, the base package can now be installed without requiring `triton`, `tilelang`, `quack-kernels`, or `causal-conv1d` up front. Those packages are imported only by the corresponding optional code paths.
 
 Other requirements:
 - Linux

@@ -16,13 +16,22 @@ import urllib.request
 import urllib.error
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
-import torch
-from torch.utils.cpp_extension import (
-    BuildExtension,
-    CUDAExtension,
-    CUDA_HOME,
-    HIP_HOME
-)
+TORCH_IMPORT_ERROR = None
+try:
+    import torch
+    from torch.utils.cpp_extension import (
+        BuildExtension,
+        CUDAExtension,
+        CUDA_HOME,
+        HIP_HOME
+    )
+except Exception as exc:
+    torch = None
+    BuildExtension = None
+    CUDAExtension = None
+    CUDA_HOME = None
+    HIP_HOME = None
+    TORCH_IMPORT_ERROR = exc
 
 
 with open("README.md", "r", encoding="utf-8") as fh:
@@ -42,6 +51,7 @@ FORCE_BUILD = os.getenv("MAMBA_FORCE_BUILD", "FALSE") == "TRUE"
 SKIP_CUDA_BUILD = os.getenv("MAMBA_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAMBA_FORCE_CXX11_ABI", "FALSE") == "TRUE"
+METADATA_ONLY_COMMANDS = {"egg_info", "dist_info", "sdist", "--name", "--version", "--help-commands"}
 
 
 def get_platform():
@@ -130,9 +140,17 @@ cmdclass = {}
 ext_modules = []
 
 
-HIP_BUILD = bool(torch.version.hip)
+if torch is None and not SKIP_CUDA_BUILD and not any(cmd in sys.argv[1:] for cmd in METADATA_ONLY_COMMANDS):
+    raise RuntimeError(
+        "PyTorch must be importable to build mamba_ssm CUDA extensions. "
+        "For metadata-only packaging steps, use `python setup.py egg_info` or set "
+        "`MAMBA_SKIP_CUDA_BUILD=TRUE`. Original import error: "
+        f"{TORCH_IMPORT_ERROR}"
+    )
 
-if not SKIP_CUDA_BUILD:
+HIP_BUILD = bool(torch.version.hip) if torch is not None else False
+
+if torch is not None and not SKIP_CUDA_BUILD:
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
@@ -397,10 +415,21 @@ setup(
         "packaging",
         "ninja",
         "einops",
-        "triton>=3.5.0",
         "transformers",
-        "tilelang==0.1.8",
-        "quack-kernels==0.3.4",
-        # "causal_conv1d>=1.4.0",
     ],
+    extras_require={
+        "causal-conv1d": ["causal-conv1d>=1.2.0"],
+        "triton": ["triton>=3.5.0"],
+        "mamba3": [
+            "triton>=3.5.0",
+            "tilelang==0.1.8",
+            "quack-kernels==0.3.4",
+        ],
+        "full": [
+            "causal-conv1d>=1.2.0",
+            "triton>=3.5.0",
+            "tilelang==0.1.8",
+            "quack-kernels==0.3.4",
+        ],
+    },
 )
