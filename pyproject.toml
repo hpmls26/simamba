@@ -28,7 +28,8 @@ Repository = "https://github.com/state-spaces/mamba"
 
 [project.optional-dependencies]
 causal-conv1d = [
-    "causal-conv1d>=1.2.0"
+    "causal-conv1d>=1.2.0,<1.6; python_version < '3.10'",
+    "causal-conv1d>=1.6.0; python_version >= '3.10'"
 ]
 triton = [
     "triton>=3.5.0"
@@ -39,7 +40,8 @@ mamba3 = [
     "quack-kernels==0.3.4"
 ]
 full = [
-    "causal-conv1d>=1.2.0",
+    "causal-conv1d>=1.2.0,<1.6; python_version < '3.10'",
+    "causal-conv1d>=1.6.0; python_version >= '3.10'",
     "triton>=3.5.0",
     "tilelang==0.1.8",
     "quack-kernels==0.3.4"
