@@ -284,3 +284,95 @@ If you use this codebase, or otherwise find our work valuable, please cite Mamba
       url={https://arxiv.org/abs/2603.15569}, 
 }
 ```
+
+
+###
+
+1. Start a CPU job to prepare the bounded SlimPajama sample
+
+  mkdir -p /insomnia001/home/ssb2234/logs
+  cd /insomnia001/home/ssb2234/mamba
+  sbatch scripts/prepare_slimpajama_smoke.sh
+
+  Watch logs:
+
+  tail -f /insomnia001/home/ssb2234/logs/SlimPajamaPrepSmoke-<jobid>.out
+  tail -f /insomnia001/home/ssb2234/logs/SlimPajamaPrepSmoke-<jobid>.err
+
+  This writes:
+
+  - /insomnia001/home/ssb2234/slimpajama_smoke/train.bin
+  - /insomnia001/home/ssb2234/slimpajama_smoke/val.bin
+  - /insomnia001/home/ssb2234/slimpajama_smoke/meta.json
+
+  If datasets is missing or outdated in the venv, do this once before submitting:
+
+  cd /insomnia001/home/ssb2234/mamba
+  source .venv/bin/activate
+  pip install -U datasets huggingface_hub hf-xet tqdm
+
+  2. After dataset prep finishes, submit the smoke comparison job
+
+  cd /insomnia001/home/ssb2234/mamba
+  sbatch scripts/run_compare_smoke_a6000.sh
+
+  Watch logs:
+
+  tail -f /insomnia001/home/ssb2234/logs/SimambaSmokeCompare-<jobid>.out
+  tail -f /insomnia001/home/ssb2234/logs/SimambaSmokeCompare-<jobid>.err
+
+  This runs sequential smoke tests for:
+
+  - Simamba
+  - Mamba2
+  - Mamba3
+
+  and writes outputs under:
+
+  - /insomnia001/home/ssb2234/simamba_compare_smoke
+
+  3. Make sure W&B env is available in the batch environment
+  Because batch jobs don’t always inherit shell state the way you expect, either:
+
+  - export the vars before sbatch, if your cluster propagates them
+  - or put them in the script itself, which you said you already did for the training launcher
+
+  The minimal required vars are:
+
+  export WANDB_API_KEY='...'
+  export WANDB_ENTITY='ssb2234-columbia'
+  export WANDB_PROJECT='simamba'
+
+  If you want to pass them explicitly when submitting:
+
+  export WANDB_API_KEY='...'
+  export WANDB_ENTITY='ssb2234-columbia'
+  export WANDB_PROJECT='simamba'
+  sbatch --export=ALL scripts/run_compare_smoke_a6000.sh
+
+  4. If you want to run the prep interactively instead of through sbatch
+
+  srun --pty -p short -c 2 --mem-per-cpu=4G -t 0-02:00 -A edu /bin/bash
+  cd /insomnia001/home/ssb2234/mamba
+  source .venv/bin/activate
+  bash scripts/prepare_slimpajama_smoke.sh
+
+  5. If you want to run the comparison interactively instead of through sbatch
+
+  srun --pty -p short --gres=gpu:1 -c 4 --mem-per-cpu=8G -t 0-06:00 -A edu /bin/bash
+  cd /insomnia001/home/ssb2234/mamba
+  source .venv/bin/activate
+  export WANDB_API_KEY='...'
+  export WANDB_ENTITY='ssb2234-columbia'
+  export WANDB_PROJECT='simamba'
+  bash scripts/run_compare_smoke_a6000.sh
+
+  Expected order
+
+  1. sbatch scripts/prepare_slimpajama_smoke.sh
+  2. wait for train.bin and val.bin
+  3. sbatch scripts/run_compare_smoke_a6000.sh
+
+  If you want, I can also give you a single copy-paste block that submits prep first, waits for it, then submits the
+  GPU smoke run
+  automatically.
