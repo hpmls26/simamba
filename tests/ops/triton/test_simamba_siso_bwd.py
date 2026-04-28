@@ -18,6 +18,10 @@ if "mamba_ssm" not in sys.modules:
     sys.modules["mamba_ssm"] = pkg
 
 from mamba_ssm.ops.triton.simamba.mamba3_siso_bwd import compute_dcoeffs
+from mamba_ssm.ops.triton.simamba.mamba3_siso_combined import (
+    mamba3_siso_combined as simamba_triton_siso_combined,
+)
+from mamba_ssm.modules.simamba import Simamba
 from mamba_ssm.ops.triton.simamba.simamba_siso_combined import simamba_siso_combined
 
 
@@ -301,3 +305,133 @@ def test_simamba_dcoeffs_match_reference_autograd_full_tensor_without_midpoint()
     _assert_close_tensor("dADT(no_mid)", dadt, adt_ref.grad, atol=1e-1, rtol=2.5e-1)
     _assert_close_tensor("dDT(no_mid)", ddt, dt_ref.grad, atol=1.2e-1, rtol=3.0e-1)
     _assert_close_tensor("dSimpson(no_mid)", dsimpson, simpson_ref.grad, atol=1e-1, rtol=2.5e-1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_simamba_triton_combined_matches_reference_autograd():
+    torch.manual_seed(12)
+    device = "cuda"
+
+    batch, seqlen = 2, 16
+    nheads = 2
+    headdim_qk = 16
+    headdim_v = 8
+    n_angles = 4
+
+    q = torch.randn(batch, seqlen, nheads, headdim_qk, device=device, dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(batch, seqlen, nheads, headdim_qk, device=device, dtype=torch.bfloat16, requires_grad=True)
+    v = torch.randn(batch, seqlen, nheads, headdim_v, device=device, dtype=torch.bfloat16, requires_grad=True)
+    adt = (-0.2 * torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)).requires_grad_(True)
+    dt = (0.01 + 0.2 * torch.rand(batch, nheads, seqlen, device=device, dtype=torch.float32)).requires_grad_(True)
+    simpson = torch.rand(batch, nheads, seqlen, device=device, dtype=torch.bfloat16, requires_grad=True)
+    q_bias = torch.randn(nheads, headdim_qk, device=device, dtype=torch.float32, requires_grad=True)
+    k_bias = torch.randn(nheads, headdim_qk, device=device, dtype=torch.float32, requires_grad=True)
+    angles = torch.randn(batch, seqlen, nheads, n_angles, device=device, dtype=torch.bfloat16, requires_grad=True)
+    d = torch.randn(nheads, device=device, dtype=torch.float32, requires_grad=True)
+    z = torch.randn(batch, seqlen, nheads, headdim_v, device=device, dtype=torch.bfloat16, requires_grad=True)
+
+    out = simamba_triton_siso_combined(
+        Q=q,
+        K=k,
+        V=v,
+        ADT=adt,
+        DT=dt,
+        Simpson=simpson,
+        Q_bias=q_bias,
+        K_bias=k_bias,
+        Angles=angles,
+        D=d,
+        Z=z,
+        chunk_size=16,
+    )
+    loss = out.float().square().mean()
+    loss.backward()
+    grads_triton = {
+        "Q": q.grad.detach().clone(),
+        "K": k.grad.detach().clone(),
+        "V": v.grad.detach().clone(),
+        "ADT": adt.grad.detach().clone(),
+        "DT": dt.grad.detach().clone(),
+        "Simpson": simpson.grad.detach().clone(),
+        "Q_bias": q_bias.grad.detach().clone(),
+        "K_bias": k_bias.grad.detach().clone(),
+        "Angles": angles.grad.detach().clone(),
+        "D": d.grad.detach().clone(),
+        "Z": z.grad.detach().clone(),
+    }
+
+    q_ref = q.detach().clone().requires_grad_(True)
+    k_ref = k.detach().clone().requires_grad_(True)
+    v_ref = v.detach().clone().requires_grad_(True)
+    adt_ref = adt.detach().clone().requires_grad_(True)
+    dt_ref = dt.detach().clone().requires_grad_(True)
+    simpson_ref = simpson.detach().clone().requires_grad_(True)
+    q_bias_ref = q_bias.detach().clone().requires_grad_(True)
+    k_bias_ref = k_bias.detach().clone().requires_grad_(True)
+    angles_ref = angles.detach().clone().requires_grad_(True)
+    d_ref = d.detach().clone().requires_grad_(True)
+    z_ref = z.detach().clone().requires_grad_(True)
+
+    out_ref = simamba_siso_combined(
+        Q=q_ref,
+        K=k_ref,
+        V=v_ref,
+        ADT=adt_ref,
+        DT=dt_ref,
+        Simpson=simpson_ref,
+        Midpoint=None,
+        Q_bias=q_bias_ref,
+        K_bias=k_bias_ref,
+        Angles=angles_ref,
+        D=d_ref,
+        Z=z_ref,
+    )
+    loss_ref = out_ref.float().square().mean()
+    loss_ref.backward()
+    grads_ref = {
+        "Q": q_ref.grad,
+        "K": k_ref.grad,
+        "V": v_ref.grad,
+        "ADT": adt_ref.grad,
+        "DT": dt_ref.grad,
+        "Simpson": simpson_ref.grad,
+        "Q_bias": q_bias_ref.grad,
+        "K_bias": k_bias_ref.grad,
+        "Angles": angles_ref.grad,
+        "D": d_ref.grad,
+        "Z": z_ref.grad,
+    }
+
+    for name in grads_ref:
+        _assert_close_tensor(name, grads_triton[name], grads_ref[name], atol=2e-1, rtol=3.5e-1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_simamba_module_triton_backward_uses_core_parameters():
+    torch.manual_seed(13)
+    device = "cuda"
+
+    model = Simamba(
+        d_model=64,
+        d_state=16,
+        expand=2,
+        headdim=16,
+        ngroups=1,
+        rope_fraction=0.5,
+        chunk_size=16,
+        simamba_backend="triton",
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    model.train()
+
+    u = torch.randn(2, 32, 64, device=device, dtype=torch.bfloat16)
+    loss = model(u).float().square().mean()
+    loss.backward()
+
+    assert model.in_proj.weight.grad is not None
+    assert model.dt_bias.grad is not None
+    assert model.B_bias.grad is not None
+    assert model.C_bias.grad is not None
+    assert model.B_norm.weight.grad is not None
+    assert model.C_norm.weight.grad is not None

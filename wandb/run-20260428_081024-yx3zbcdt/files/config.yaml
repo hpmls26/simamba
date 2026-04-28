@@ -1,0 +1,300 @@
+_wandb:
+    value:
+        cli_version: 0.26.1
+        e:
+            nj70xumjwko07lukflc0yiqpxsggiiy2:
+                args:
+                    - --train-data
+                    - /insomnia001/home/ssb2234/slimpajama_smoke/train.bin
+                    - --val-data
+                    - /insomnia001/home/ssb2234/slimpajama_smoke/val.bin
+                    - --seq-len
+                    - "1024"
+                    - --global-batch-size
+                    - "8"
+                    - --micro-batch-size
+                    - "2"
+                    - --max-steps
+                    - "200"
+                    - --save-every
+                    - "100"
+                    - --eval-every
+                    - "100"
+                    - --eval-iters
+                    - "10"
+                    - --keep-milestones
+                    - "1"
+                    - --dtype
+                    - bf16
+                    - --wandb
+                    - --wandb-project
+                    - simamba
+                    - --wandb-entity
+                    - ssb2234-columbia
+                    - --wandb-group
+                    - slimpajama_smoke_20260428_080949
+                    - --model-layer
+                    - Simamba
+                    - --simamba-backend
+                    - triton
+                    - --output-dir
+                    - /insomnia001/home/ssb2234/simamba_compare_smoke/simamba_smoke
+                    - --wandb-name
+                    - simamba_smoke_20260428_080949
+                codePath: scripts/train_simamba_lm.py
+                codePathLocal: scripts/train_simamba_lm.py
+                cpu_count: 96
+                cpu_count_logical: 192
+                cudaVersion: "12.9"
+                disk:
+                    /:
+                        total: "923746840576"
+                        used: "31253651456"
+                email: ssb2234@columbia.edu
+                executable: /insomnia001/home/ssb2234/mamba/.venv/bin/python
+                git:
+                    commit: 66f77cf5dc6fe8979032cf257f1456edd8e2ac69
+                    remote: git@github.com:hpmls26/mamba.git
+                gpu: NVIDIA RTX A6000
+                gpu_count: 4
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-7c923060-64aa-9711-88d7-5b7d6b355849
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-8d59c20e-811b-9336-c483-cb4a882b7920
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-f04f3313-4f53-d506-c010-3bf173554345
+                    - architecture: Ampere
+                      cudaCores: 10752
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX A6000
+                      uuid: GPU-a3ded510-4a39-1cda-0d28-e9fc399b1bf8
+                host: ins084
+                memory:
+                    total: "1081440206848"
+                os: Linux-5.14.0-570.12.1.el9_6.x86_64-x86_64-with-glibc2.34
+                program: /insomnia001/home/ssb2234/mamba/scripts/train_simamba_lm.py
+                python: CPython 3.12.13
+                root: /insomnia001/home/ssb2234/mamba
+                slurm:
+                    cluster_name: insomnia
+                    conf: /etc/slurm/slurm.conf
+                    cpus_on_node: "2"
+                    gpus_on_node: "4"
+                    gtids: "0"
+                    job_account: edu
+                    job_cpus_per_node: "2"
+                    job_end_time: "1778587251"
+                    job_gid: "500"
+                    job_group: user
+                    job_id: "9010079"
+                    job_name: bash
+                    job_nodelist: ins084
+                    job_num_nodes: "1"
+                    job_partition: burst
+                    job_qos: burst_interactive
+                    job_start_time: "1777377651"
+                    job_uid: "561475"
+                    job_user: ssb2234
+                    jobid: "9010079"
+                    launch_node_ipaddr: 10.197.95.249
+                    localid: "0"
+                    nnodes: "1"
+                    nodeid: "0"
+                    nodelist: ins084
+                    nprocs: "1"
+                    ntasks: "1"
+                    oom_kill_step: "0"
+                    prio_process: "0"
+                    procid: "0"
+                    pty_port: "42309"
+                    pty_win_col: "144"
+                    pty_win_row: "27"
+                    srun_comm_host: 10.197.95.249
+                    srun_comm_port: "37833"
+                    step_gpus: 1,3,4,5
+                    step_id: "0"
+                    step_launcher_port: "37833"
+                    step_nodelist: ins084
+                    step_num_nodes: "1"
+                    step_num_tasks: "1"
+                    step_tasks_per_node: "1"
+                    stepid: "0"
+                    submit_dir: /insomnia001/home/ssb2234/mamba
+                    submit_host: 2402-login-001
+                    task_pid: "2501353"
+                    tasks_per_node: "1"
+                    topology_addr: ins084
+                    topology_addr_pattern: node
+                    umask: "0027"
+                startedAt: "2026-04-28T12:10:24.539458Z"
+                writerId: nj70xumjwko07lukflc0yiqpxsggiiy2
+        m: []
+        python_version: 3.12.13
+        t:
+            "1":
+                - 1
+                - 11
+                - 49
+            "2":
+                - 1
+                - 11
+                - 49
+            "3":
+                - 13
+                - 16
+                - 61
+            "4": 3.12.13
+            "5": 0.26.1
+            "6": 5.6.2
+            "12": 0.26.1
+            "13": linux-x86_64
+betas:
+    value:
+        - 0.9
+        - 0.95
+compile:
+    value: false
+d_intermediate:
+    value: 0
+d_model:
+    value: 768
+device:
+    value: cuda
+dtype:
+    value: bf16
+eval_every:
+    value: 100
+eval_iters:
+    value: 10
+fused_add_norm:
+    value: true
+global_batch_size:
+    value: 8
+grad_clip:
+    value: 1
+keep_milestones:
+    value: 1
+lm_eval_batch_size:
+    value: 64
+lm_eval_every:
+    value: 0
+lm_eval_tasks:
+    value: lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa
+log_every:
+    value: 10
+lr:
+    value: 0.0003
+mamba2_chunk_size:
+    value: 256
+mamba2_d_conv:
+    value: 4
+mamba2_d_state:
+    value: 128
+mamba2_expand:
+    value: 2
+mamba2_headdim:
+    value: 64
+mamba2_ngroups:
+    value: 1
+mamba2_use_mem_eff_path:
+    value: true
+mamba3_chunk_size:
+    value: 64
+mamba3_d_state:
+    value: 128
+mamba3_expand:
+    value: 2
+mamba3_headdim:
+    value: 64
+mamba3_is_mimo:
+    value: false
+mamba3_mimo_rank:
+    value: 4
+mamba3_ngroups:
+    value: 1
+mamba3_outproj_norm:
+    value: false
+mamba3_rope_fraction:
+    value: 0.5
+max_steps:
+    value: 200
+micro_batch_size:
+    value: 2
+min_lr:
+    value: 3e-05
+model_layer:
+    value: Simamba
+n_layer:
+    value: 24
+num_workers:
+    value: 0
+output_dir:
+    value: /insomnia001/home/ssb2234/simamba_compare_smoke/simamba_smoke
+pad_vocab_size_multiple:
+    value: 8
+residual_in_fp32:
+    value: true
+resume:
+    value: null
+rms_norm:
+    value: true
+save_best:
+    value: true
+save_every:
+    value: 100
+save_optimizer_latest_only:
+    value: true
+seed:
+    value: 1337
+seq_len:
+    value: 1024
+simamba_backend:
+    value: triton
+simamba_chunk_size:
+    value: 64
+simamba_d_state:
+    value: 128
+simamba_expand:
+    value: 2
+simamba_headdim:
+    value: 64
+simamba_ngroups:
+    value: 1
+simamba_outproj_norm:
+    value: false
+simamba_rope_fraction:
+    value: 0.5
+simamba_use_midpoint_control:
+    value: false
+token_dtype:
+    value: uint16
+train_data:
+    value: /insomnia001/home/ssb2234/slimpajama_smoke/train.bin
+val_data:
+    value: /insomnia001/home/ssb2234/slimpajama_smoke/val.bin
+vocab_size:
+    value: 50280
+wandb:
+    value: true
+wandb_entity:
+    value: ssb2234-columbia
+wandb_group:
+    value: slimpajama_smoke_20260428_080949
+wandb_name:
+    value: simamba_smoke_20260428_080949
+wandb_project:
+    value: simamba
+warmup_steps:
+    value: 500
+weight_decay:
+    value: 0.1

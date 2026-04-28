@@ -661,7 +661,9 @@ def mamba3_siso_fwd(
     if is_varlen and batch != 1:
         raise ValueError(f"Varlen mode requires batch=1, got batch={batch}.")
 
-    if store_states_adt_outv or is_varlen:
+    # The chunk-parallel kernel uses tl.dot over the qk axis, which on current
+    # Triton requires K >= 16. Tiny test shapes fall back to the step loop.
+    if store_states_adt_outv or is_varlen or headdim_qk < 16:
         out, final_states = _mamba3_siso_fwd_loop(
             Q=Q,
             K=K,

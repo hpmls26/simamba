@@ -15,7 +15,9 @@ from mamba_ssm.ops.triton.simamba.simamba_siso_combined import (
     simamba_siso_combined,
     simamba_siso_step,
 )
-from mamba_ssm.ops.triton.simamba.mamba3_siso_fwd import mamba3_siso_fwd as simamba_triton_siso_fwd
+from mamba_ssm.ops.triton.simamba.mamba3_siso_combined import (
+    mamba3_siso_combined as simamba_triton_siso_combined,
+)
 from mamba_ssm.ops.triton.simamba.mamba3_siso_step import mamba3_siso_step as simamba_triton_siso_step
 
 
@@ -263,7 +265,7 @@ class Simamba(nn.Module):
                 v_prev1_state.copy_(last_v1)
                 v_prev2_state.copy_(last_v2)
         else:
-            y_tuple = simamba_triton_siso_fwd(
+            y_tuple = simamba_triton_siso_combined(
                 Q=C.squeeze(2),
                 K=B.squeeze(2),
                 V=x,
@@ -281,18 +283,16 @@ class Simamba(nn.Module):
                 return_final_states=input_states is not None,
                 cu_seqlens=cu_seqlens,
             )
-            y = y_tuple[0]
             if ssm_state is not None:
-                final_states = y_tuple[-1]
-                if final_states is None:
-                    raise RuntimeError("Triton Simamba path did not return final states.")
-                last_angle, last_state, last_k1, last_k2, last_v1, last_v2 = final_states
+                y, last_angle, last_state, last_k1, last_k2, last_v1, last_v2 = y_tuple
                 angle_dt_state.copy_(last_angle)
                 ssm_state.copy_(last_state)
                 k_prev1_state.copy_(last_k1)
                 k_prev2_state.copy_(last_k2)
                 v_prev1_state.copy_(last_v1)
                 v_prev2_state.copy_(last_v2)
+            else:
+                y = y_tuple
 
         y = rearrange(y, "b l h p -> b l (h p)")
         if self.is_outproj_norm:

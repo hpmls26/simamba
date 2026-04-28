@@ -10,12 +10,25 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
+
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "Expected virtualenv python at ${PYTHON_BIN}" >&2
+  exit 1
+fi
+
+cd "${REPO_ROOT}"
+export PYTHONNOUSERSITE=1
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+
 # Minimal launcher for Simamba LM pretraining on a single node.
 #
 # Usage:
-WANDB_API_KEY=''
-WANDB_ENTITY='ssb2234-columbia'
-WANDB_PROJECT='simamba'
+#   export WANDB_API_KEY=...
+#   export WANDB_ENTITY=ssb2234-columbia
+#   export WANDB_PROJECT=simamba
 #   bash scripts/run_train_simamba_130m.sh /path/train.bin /path/val.bin /path/output_dir
 #
 # Optional environment overrides:
@@ -86,6 +99,7 @@ ARGS=(
   --simamba-backend triton
   --wandb
   --wandb-project "${WANDB_PROJECT}"
+  --wandb-entity "${WANDB_ENTITY}"
 )
 
 if [[ -n "${VAL_DATA}" ]]; then
@@ -108,8 +122,34 @@ echo "  max_steps=${MAX_STEPS}"
 echo "  wandb_entity=${WANDB_ENTITY}"
 echo "  wandb_project=${WANDB_PROJECT}"
 
+"${PYTHON_BIN}" - <<'PY'
+import os
+import sys
+import torch
+
+try:
+    import wandb  # noqa: F401
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "W&B logging was requested, but 'wandb' is not installed in the repo venv. "
+        f"Install it with: {sys.executable} -m pip install wandb "
+        "or sync the optional 'train' dependencies declared in pyproject.toml."
+    ) from exc
+
+print(f"torch={torch.__version__}")
+print(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')}")
+print(f"cuda.device_count={torch.cuda.device_count()}")
+print(f"cuda.is_available={torch.cuda.is_available()}")
+
+if not torch.cuda.is_available():
+    raise SystemExit(
+        "CUDA preflight failed: PyTorch can see device entries but cannot initialize CUDA. "
+        "Verify the job was started in a fresh GPU allocation and that the active Python environment has a working CUDA-enabled torch build."
+    )
+PY
+
 if [[ "${GPUS}" == "1" ]]; then
-  .venv/bin/python scripts/train_simamba_lm.py "${ARGS[@]}"
+  "${PYTHON_BIN}" scripts/train_simamba_lm.py "${ARGS[@]}"
 else
-  .venv/bin/torchrun --nproc_per_node="${GPUS}" scripts/train_simamba_lm.py "${ARGS[@]}"
+  "${PYTHON_BIN}" -m torch.distributed.run --nproc_per_node="${GPUS}" scripts/train_simamba_lm.py "${ARGS[@]}"
 fi

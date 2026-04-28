@@ -6,7 +6,7 @@ authors = [
     { name = "Tri Dao", email = "tri@tridao.me" },
     { name = "Albert Gu", email = "agu@cs.cmu.edu" }
 ]
-requires-python = ">= 3.9"
+requires-python = ">=3.12"
 dynamic = ["version"]
 license = { file = "LICENSE" }  # Include a LICENSE file in your repo
 keywords = ["cuda", "pytorch", "state-space model"]
@@ -18,6 +18,7 @@ classifiers = [
 dependencies = [
     "torch",
     "ninja",
+    "numpy",
     "einops",
     "transformers",
     "packaging",
@@ -27,6 +28,9 @@ dependencies = [
 Repository = "https://github.com/state-spaces/mamba"
 
 [project.optional-dependencies]
+train = [
+    "wandb"
+]
 causal-conv1d = [
     "causal-conv1d>=1.2.0,<1.6; python_version < '3.10'",
     "causal-conv1d>=1.6.0; python_version >= '3.10'"
@@ -40,6 +44,7 @@ mamba3 = [
     "quack-kernels==0.3.4"
 ]
 full = [
+    "wandb",
     "causal-conv1d>=1.2.0,<1.6; python_version < '3.10'",
     "causal-conv1d>=1.6.0; python_version >= '3.10'",
     "triton>=3.5.0",
@@ -63,3 +68,6 @@ requires = [
     "ninja",
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.uv]
+no-build-isolation-package = ["mamba-ssm"]

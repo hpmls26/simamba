@@ -111,6 +111,13 @@ def parse_args():
 def setup_distributed():
     if "RANK" not in os.environ:
         return False, 0, 1, 0
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "Distributed training requested but CUDA is not available. "
+            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r}, "
+            f"torch.cuda.device_count()={torch.cuda.device_count()}. "
+            "This usually indicates a broken CUDA runtime in the active environment or a stale GPU allocation."
+        )
     dist.init_process_group(backend="nccl")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
@@ -346,7 +353,14 @@ def main():
 
     wandb_run = None
     if args.wandb and is_master(rank):
-        import wandb
+        try:
+            import wandb
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "W&B logging was requested, but 'wandb' is not installed in the active interpreter. "
+                f"Install it with: {sys.executable} -m pip install wandb "
+                "or sync the optional 'train' dependencies declared in pyproject.toml."
+            ) from exc
 
         wandb_run = wandb.init(
             project=args.wandb_project,
