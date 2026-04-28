@@ -1,0 +1,21 @@
+{"time":"2026-04-28T07:53:34.554660995-04:00","level":"INFO","msg":"wandb-core"}
+{"time":"2026-04-28T07:53:34.561653151-04:00","level":"INFO","msg":"stream: starting","core version":"0.26.1"}
+{"time":"2026-04-28T07:53:34.867197404-04:00","level":"INFO","msg":"stream: created new stream","id":"uch2z4c6"}
+{"time":"2026-04-28T07:53:34.867383734-04:00","level":"INFO","msg":"handler: started"}
+{"time":"2026-04-28T07:53:34.868360982-04:00","level":"INFO","msg":"stream: started"}
+{"time":"2026-04-28T07:53:34.868417802-04:00","level":"INFO","msg":"writer: started","stream_id":"uch2z4c6"}
+{"time":"2026-04-28T07:53:34.868486352-04:00","level":"INFO","msg":"sender: started"}
+{"time":"2026-04-28T07:53:37.328225478-04:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":40}
+{"time":"2026-04-28T07:53:37.334700625-04:00","level":"INFO","msg":"filestream: sending request","total_files":1,"console_offset":0,"console_lines":45}
+{"time":"2026-04-28T07:53:37.336076142-04:00","level":"ERROR","msg":"runconsolelogs: failed to create chunk: failed to create chunk file: open /insomnia001/home/ssb2234/mamba/wandb/run-20260428_075334-uch2z4c6/files/output.log: disk quota exceeded"}
+{"time":"2026-04-28T07:53:37.338619677-04:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":2}
+{"time":"2026-04-28T07:53:37.385460029-04:00","level":"ERROR","msg":"sender: failed to upload run summary: open /insomnia001/home/ssb2234/mamba/wandb/run-20260428_075334-uch2z4c6/files/wandb-summary.json: disk quota exceeded"}
+{"time":"2026-04-28T07:53:37.622266746-04:00","level":"INFO","msg":"filestream: request sent","status":"200 OK"}
+{"time":"2026-04-28T07:53:37.876017007-04:00","level":"ERROR","msg":"sender: failed to upload run config: open /insomnia001/home/ssb2234/mamba/wandb/run-20260428_075334-uch2z4c6/files/config.yaml: disk quota exceeded"}
+{"time":"2026-04-28T07:53:38.25870133-04:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2026-04-28T07:53:38.259177759-04:00","level":"INFO","msg":"filestream: sending request","total_files":2,"console_offset":45,"console_lines":141,"uploaded_len":2,"complete":true,"exit_code":1}
+{"time":"2026-04-28T07:53:38.554284835-04:00","level":"INFO","msg":"filestream: request sent","status":"200 OK"}
+{"time":"2026-04-28T07:53:38.554549614-04:00","level":"INFO","msg":"stream: finishing up"}
+{"time":"2026-04-28T07:53:38.554633644-04:00","level":"INFO","msg":"handler: closed"}
+{"time":"2026-04-28T07:53:38.555076963-04:00","level":"INFO","msg":"sender: closed"}
+{"time":"2026-04-28T07:53:38.555100743-04:00","level":"INFO","msg":"stream: all finished"}

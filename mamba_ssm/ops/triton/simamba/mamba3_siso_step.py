@@ -348,7 +348,18 @@ def mamba3_siso_step(
     Midpoint: Optional[torch.Tensor] = None,
     D: Optional[torch.Tensor] = None,
     Z: Optional[torch.Tensor] = None,
+    Out: Optional[torch.Tensor] = None,
     Input_States: Optional[
+        Tuple[
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+            torch.Tensor,
+        ]
+    ] = None,
+    Output_States: Optional[
         Tuple[
             torch.Tensor,
             torch.Tensor,
@@ -421,13 +432,33 @@ def mamba3_siso_step(
     if Z is not None:
         Z = Z.contiguous() if not Z.is_contiguous() else Z
 
-    Out = torch.empty((batch, nheads, headdim_v), device=device, dtype=V.dtype)
-    Output_Angle_State = torch.empty((batch, nheads, headdim_angles), device=device, dtype=torch.float32)
-    Output_SSM_State = torch.empty((batch, nheads, headdim_v, headdim_qk), device=device, dtype=torch.float32)
-    Output_K_prev1_State = torch.empty((batch, nheads, headdim_qk), device=device, dtype=Q.dtype)
-    Output_K_prev2_State = torch.empty((batch, nheads, headdim_qk), device=device, dtype=Q.dtype)
-    Output_V_prev1_State = torch.empty((batch, nheads, headdim_v), device=device, dtype=V.dtype)
-    Output_V_prev2_State = torch.empty((batch, nheads, headdim_v), device=device, dtype=V.dtype)
+    if Out is None:
+        Out = torch.empty((batch, nheads, headdim_v), device=device, dtype=V.dtype)
+    else:
+        assert Out.shape == (batch, nheads, headdim_v)
+
+    if Output_States is None:
+        Output_Angle_State = torch.empty((batch, nheads, headdim_angles), device=device, dtype=torch.float32)
+        Output_SSM_State = torch.empty((batch, nheads, headdim_v, headdim_qk), device=device, dtype=torch.float32)
+        Output_K_prev1_State = torch.empty((batch, nheads, headdim_qk), device=device, dtype=Q.dtype)
+        Output_K_prev2_State = torch.empty((batch, nheads, headdim_qk), device=device, dtype=Q.dtype)
+        Output_V_prev1_State = torch.empty((batch, nheads, headdim_v), device=device, dtype=V.dtype)
+        Output_V_prev2_State = torch.empty((batch, nheads, headdim_v), device=device, dtype=V.dtype)
+    else:
+        (
+            Output_Angle_State,
+            Output_SSM_State,
+            Output_K_prev1_State,
+            Output_K_prev2_State,
+            Output_V_prev1_State,
+            Output_V_prev2_State,
+        ) = Output_States
+        assert Output_Angle_State.shape == (batch, nheads, headdim_angles)
+        assert Output_SSM_State.shape == (batch, nheads, headdim_v, headdim_qk)
+        assert Output_K_prev1_State.shape == (batch, nheads, headdim_qk)
+        assert Output_K_prev2_State.shape == (batch, nheads, headdim_qk)
+        assert Output_V_prev1_State.shape == (batch, nheads, headdim_v)
+        assert Output_V_prev2_State.shape == (batch, nheads, headdim_v)
 
     midpoint_ptr = Midpoint if Midpoint is not None else Simpson
     grid = (nheads, batch)

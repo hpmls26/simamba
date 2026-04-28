@@ -26,13 +26,17 @@ with an efficient hardware-aware design and implementation in the spirit of [Fla
 ## Installation
 
 Install PyTorch first, then:
-- [Option] `pip install causal-conv1d>=1.4.0 --no-build-isolation`: an efficient implementation of a simple causal Conv1d layer used inside the Mamba block.
-- `pip install mamba-ssm --no-build-isolation`: the core Mamba package.
-- `pip install mamba-ssm[causal-conv1d] --no-build-isolation`: To install core Mamba package and causal-conv1d.
+- `pip install mamba-ssm --no-build-isolation`: the core package with the common Python dependencies only.
+- `pip install mamba-ssm[causal-conv1d] --no-build-isolation`: core package plus optional `causal-conv1d`.
+- `pip install mamba-ssm[triton] --no-build-isolation`: core package plus Triton kernels.
+- `pip install mamba-ssm[mamba3] --no-build-isolation`: core package plus the extra dependencies required for Mamba-3 kernels.
+- `pip install mamba-ssm[full] --no-build-isolation`: install all optional runtime extras.
 
 `--no-build-isolation` is required so that pip uses your existing CUDA-enabled PyTorch instead of installing torch-cpu in an isolated build environment.
 
 NOTE: To use Mamba-3, please install from source `MAMBA_FORCE_BUILD=TRUE pip install --no-cache-dir --force-reinstall git+https://github.com/state-spaces/mamba.git --no-build-isolation`.
+
+If you are packaging from a local checkout for environments like Google Colab, the base package can now be installed without requiring `triton`, `tilelang`, `quack-kernels`, or `causal-conv1d` up front. Those packages are imported only by the corresponding optional code paths.
 
 Other requirements:
 - Linux
@@ -280,3 +284,131 @@ If you use this codebase, or otherwise find our work valuable, please cite Mamba
       url={https://arxiv.org/abs/2603.15569}, 
 }
 ```
+
+
+###
+
+1. Start a CPU job to prepare the bounded SlimPajama sample
+
+  mkdir -p /insomnia001/home/ssb2234/logs
+  cd /insomnia001/home/ssb2234/mamba
+  sbatch scripts/prepare_slimpajama_smoke.sh
+
+  Watch logs:
+
+  tail -f /insomnia001/home/ssb2234/logs/SlimPajamaPrepSmoke-<jobid>.out
+  tail -f /insomnia001/home/ssb2234/logs/SlimPajamaPrepSmoke-<jobid>.err
+
+  This writes:
+
+  - /insomnia001/home/ssb2234/slimpajama_smoke/train.bin
+  - /insomnia001/home/ssb2234/slimpajama_smoke/val.bin
+  - /insomnia001/home/ssb2234/slimpajama_smoke/meta.json
+
+  If datasets is missing or outdated in the venv, do this once before submitting:
+
+  cd /insomnia001/home/ssb2234/mamba
+  source .venv/bin/activate
+  pip install -U datasets huggingface_hub hf-xet tqdm
+
+  2. After dataset prep finishes, submit the smoke comparison job
+
+  cd /insomnia001/home/ssb2234/mamba
+  sbatch scripts/run_compare_smoke_a6000.sh
+
+  Watch logs:
+
+  tail -f /insomnia001/home/ssb2234/logs/SimambaSmokeCompare-<jobid>.out
+  tail -f /insomnia001/home/ssb2234/logs/SimambaSmokeCompare-<jobid>.err
+
+  This runs sequential smoke tests for:
+
+  - Simamba
+  - Mamba2
+  - Mamba3
+
+  and writes outputs under:
+
+  - /insomnia001/home/ssb2234/simamba_compare_smoke
+
+  3. Make sure W&B env is available in the batch environment
+  Because batch jobs don’t always inherit shell state the way you expect, either:
+
+  - export the vars before sbatch, if your cluster propagates them
+  - or put them in the script itself, which you said you already did for the training launcher
+
+  The minimal required vars are:
+
+  export WANDB_API_KEY='...'
+  export WANDB_ENTITY='ssb2234-columbia'
+  export WANDB_PROJECT='simamba'
+
+  If you want to pass them explicitly when submitting:
+
+  export WANDB_API_KEY='...'
+  export WANDB_ENTITY='ssb2234-columbia'
+  export WANDB_PROJECT='simamba'
+  sbatch --export=ALL scripts/run_compare_smoke_a6000.sh
+
+  4. If you want to run the prep interactively instead of through sbatch
+
+  srun --pty -p short -c 2 --mem-per-cpu=4G -t 0-02:00 -A edu /bin/bash
+  cd /insomnia001/home/ssb2234/mamba
+  source .venv/bin/activate
+  bash scripts/prepare_slimpajama_smoke.sh
+
+  5. If you want to run the comparison interactively instead of through sbatch
+
+  srun --pty -p short --gres=gpu:1 -c 4 --mem-per-cpu=8G -t 0-06:00 -A edu /bin/bash
+  cd /insomnia001/home/ssb2234/mamba
+  source .venv/bin/activate
+  export WANDB_API_KEY='...'
+  export WANDB_ENTITY='ssb2234-columbia'
+  export WANDB_PROJECT='simamba'
+  bash scripts/run_compare_smoke_a6000.sh
+
+  Expected order
+
+  1. sbatch scripts/prepare_slimpajama_smoke.sh
+  2. wait for train.bin and val.bin
+  3. sbatch scripts/run_compare_smoke_a6000.sh
+
+  If you want, I can also give you a single copy-paste block that submits prep first, waits for it, then submits the
+  GPU smoke run
+  automatically.
+
+## 130M training with async GCS checkpoint export
+
+The long-running launcher is:
+
+```bash
+scripts/run_train_simamba_130m.sh
+```
+
+It now defaults to the same `burst` 4-GPU shape used by the working smoke run, validates that the visible GPUs match `A6000`, writes W&B scratch files under the training output directory instead of the repo root, and saves model-only milestone checkpoints every 25 steps for asynchronous export.
+
+Before submitting, make sure these variables are available in the batch environment:
+
+```bash
+export WANDB_API_KEY='...'
+export WANDB_ENTITY='ssb2234-columbia'
+export WANDB_PROJECT='simamba'
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json  # if needed
+export GCS_BUCKET=<bucket-name>
+```
+
+Then submit:
+
+```bash
+sbatch --export=ALL scripts/run_train_simamba_130m.sh /path/train.bin /path/val.bin /path/output_dir
+```
+
+Notes:
+
+- The async exporter uploads `step_*` milestone archives to `GCS_PREFIX/GCS_RUN_PREFIX/checkpoints` in the configured bucket.
+- `GCS_RUN_PREFIX` defaults to `$(basename OUTPUT_DIR)` and can be overridden explicitly.
+- `GCS_PREFIX` is optional and lets you place runs under a shared object prefix.
+- If `OUTPUT_DIR/latest/trainer.pt` is missing at startup and `GCS_RESTORE_IF_MISSING=1`, the launcher synchronously restores the newest uploaded `step_*.tar` milestone from GCS into `OUTPUT_DIR/latest` before training starts.
+- That remote restore brings back model weights and step number, but not optimizer state, because exported `step_*` milestones are model-only.
+- The uploader uses resumable GCS session URIs and persists session state locally so interrupted uploads can continue without restarting the whole archive transfer.
+- If you need to disable remote export for a one-off run, set `GCS_EXPORT=0`.

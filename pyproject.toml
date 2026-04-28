@@ -6,7 +6,7 @@ authors = [
     { name = "Tri Dao", email = "tri@tridao.me" },
     { name = "Albert Gu", email = "agu@cs.cmu.edu" }
 ]
-requires-python = ">= 3.9"
+requires-python = ">=3.12"
 dynamic = ["version"]
 license = { file = "LICENSE" }  # Include a LICENSE file in your repo
 keywords = ["cuda", "pytorch", "state-space model"]
@@ -17,10 +17,8 @@ classifiers = [
 ]
 dependencies = [
     "torch",
-    "tilelang==0.1.8",
-    "quack-kernels==0.3.1",
-    "triton>=3.5.0",
     "ninja",
+    "numpy",
     "einops",
     "transformers",
     "packaging",
@@ -30,8 +28,34 @@ dependencies = [
 Repository = "https://github.com/state-spaces/mamba"
 
 [project.optional-dependencies]
+train = [
+    "wandb",
+    "google-cloud-storage",
+    "datasets",
+    "zstandard",
+]
 causal-conv1d = [
-    "causal-conv1d>=1.2.0"
+    "causal-conv1d>=1.2.0,<1.6; python_version < '3.10'",
+    "causal-conv1d>=1.6.0; python_version >= '3.10'"
+]
+triton = [
+    "triton>=3.5.0"
+]
+mamba3 = [
+    "triton>=3.5.0",
+    "tilelang==0.1.8",
+    "quack-kernels==0.3.4"
+]
+full = [
+    "wandb",
+    "google-cloud-storage",
+    "datasets",
+    "zstandard",
+    "causal-conv1d>=1.2.0,<1.6; python_version < '3.10'",
+    "causal-conv1d>=1.6.0; python_version >= '3.10'",
+    "triton>=3.5.0",
+    "tilelang==0.1.8",
+    "quack-kernels==0.3.4"
 ]
 dev = [
     "pytest"
@@ -50,3 +74,6 @@ requires = [
     "ninja",
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.uv]
+no-build-isolation-package = ["mamba-ssm"]

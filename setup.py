@@ -4,6 +4,7 @@ import warnings
 import os
 import re
 import ast
+import sysconfig
 from pathlib import Path
 from packaging.version import parse, Version
 import platform
@@ -16,13 +17,22 @@ import urllib.request
 import urllib.error
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
-import torch
-from torch.utils.cpp_extension import (
-    BuildExtension,
-    CUDAExtension,
-    CUDA_HOME,
-    HIP_HOME
-)
+TORCH_IMPORT_ERROR = None
+try:
+    import torch
+    from torch.utils.cpp_extension import (
+        BuildExtension,
+        CUDAExtension,
+        CUDA_HOME,
+        HIP_HOME
+    )
+except Exception as exc:
+    torch = None
+    BuildExtension = None
+    CUDAExtension = None
+    CUDA_HOME = None
+    HIP_HOME = None
+    TORCH_IMPORT_ERROR = exc
 
 
 with open("README.md", "r", encoding="utf-8") as fh:
@@ -42,6 +52,7 @@ FORCE_BUILD = os.getenv("MAMBA_FORCE_BUILD", "FALSE") == "TRUE"
 SKIP_CUDA_BUILD = os.getenv("MAMBA_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAMBA_FORCE_CXX11_ABI", "FALSE") == "TRUE"
+METADATA_ONLY_COMMANDS = {"egg_info", "dist_info", "sdist", "--name", "--version", "--help-commands"}
 
 
 def get_platform():
@@ -126,13 +137,45 @@ def append_nvcc_threads(nvcc_extra_args):
     return nvcc_extra_args + ["--threads", "4"]
 
 
+def ensure_python_headers_available():
+    include_candidates = []
+    for candidate in (
+        sysconfig.get_path("include"),
+        sysconfig.get_config_var("INCLUDEPY"),
+        sysconfig.get_config_var("CONFINCLUDEPY"),
+    ):
+        if candidate and candidate not in include_candidates:
+            include_candidates.append(candidate)
+
+    for include_dir in include_candidates:
+        if os.path.exists(os.path.join(include_dir, "Python.h")):
+            return
+
+    searched = ", ".join(include_candidates) if include_candidates else "<none>"
+    raise RuntimeError(
+        "Python development headers were not found. "
+        f"Searched: {searched}. "
+        "Install the Python development package for this interpreter, or provide a "
+        "header include directory via CFLAGS/CPATH that contains Python.h."
+    )
+
+
 cmdclass = {}
 ext_modules = []
 
 
-HIP_BUILD = bool(torch.version.hip)
+if torch is None and not SKIP_CUDA_BUILD and not any(cmd in sys.argv[1:] for cmd in METADATA_ONLY_COMMANDS):
+    raise RuntimeError(
+        "PyTorch must be importable to build mamba_ssm CUDA extensions. "
+        "For metadata-only packaging steps, use `python setup.py egg_info` or set "
+        "`MAMBA_SKIP_CUDA_BUILD=TRUE`. Original import error: "
+        f"{TORCH_IMPORT_ERROR}"
+    )
 
-if not SKIP_CUDA_BUILD:
+HIP_BUILD = bool(torch.version.hip) if torch is not None else False
+
+if torch is not None and not SKIP_CUDA_BUILD:
+    ensure_python_headers_available()
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
@@ -163,6 +206,8 @@ if not SKIP_CUDA_BUILD:
     else:
         check_if_cuda_home_none(PACKAGE_NAME)
         # Check, if CUDA11 is installed for compute capability 8.0
+        torch_cuda_version = parse(torch.version.cuda)
+        bare_metal_version = torch_cuda_version
 
         if CUDA_HOME is not None:
             _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
@@ -174,7 +219,6 @@ if not SKIP_CUDA_BUILD:
 
         # If system CUDA and PyTorch CUDA have different major versions,
         # clear TORCH_CUDA_ARCH_LIST to prevent cpp_extension from erroring
-        torch_cuda_version = parse(torch.version.cuda)
         if bare_metal_version.major != torch_cuda_version.major:
             os.environ["TORCH_CUDA_ARCH_LIST"] = ""
 
@@ -397,10 +441,21 @@ setup(
         "packaging",
         "ninja",
         "einops",
-        "triton>=3.5.0",
         "transformers",
-        "tilelang==0.1.8",
-        "quack-kernels==0.3.4",
-        # "causal_conv1d>=1.4.0",
     ],
+    extras_require={
+        "causal-conv1d": ["causal-conv1d>=1.2.0"],
+        "triton": ["triton>=3.5.0"],
+        "mamba3": [
+            "triton>=3.5.0",
+            "tilelang==0.1.8",
+            "quack-kernels==0.3.4",
+        ],
+        "full": [
+            "causal-conv1d>=1.2.0",
+            "triton>=3.5.0",
+            "tilelang==0.1.8",
+            "quack-kernels==0.3.4",
+        ],
+    },
 )
