@@ -6,6 +6,7 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 import time
 from contextlib import nullcontext
 from dataclasses import asdict
@@ -20,6 +21,24 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from mamba_ssm.models.config_mamba import MambaConfig
 from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
+
+
+def emit_status(event: str, *, rank: Optional[int] = None, **fields):
+    if rank not in (None, 0):
+        return
+    payload = {
+        "event": event,
+        "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "pid": os.getpid(),
+    }
+    if rank is not None:
+        payload["rank"] = rank
+    payload.update(fields)
+    print(json.dumps(payload), flush=True)
+
+
+def count_parameters(model) -> int:
+    return sum(parameter.numel() for parameter in model.parameters())
 
 
 def parse_args():
@@ -80,7 +99,7 @@ def parse_args():
     parser.add_argument("--betas", type=float, nargs=2, default=(0.9, 0.95))
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--warmup-steps", type=int, default=500)
-    parser.add_argument("--log-every", type=int, default=10)
+    parser.add_argument("--log-every", type=int, default=1)
     parser.add_argument("--eval-every", type=int, default=500)
     parser.add_argument("--eval-iters", type=int, default=50)
     parser.add_argument("--save-every", type=int, default=1000)
@@ -101,6 +120,12 @@ def parse_args():
     parser.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY"))
     parser.add_argument("--wandb-name", default=None)
     parser.add_argument("--wandb-group", default=None)
+    parser.add_argument(
+        "--wandb-console",
+        choices=["auto", "off", "wrap", "redirect", "wrap_raw", "wrap_emu"],
+        default=os.environ.get("WANDB_CONSOLE", "auto"),
+        help="W&B console capture mode for stdout/stderr.",
+    )
 
     parser.add_argument("--lm-eval-every", type=int, default=0, help="Run lm-eval every N steps. 0 disables.")
     parser.add_argument("--lm-eval-tasks", default="lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa")
@@ -233,6 +258,16 @@ def save_checkpoint(path: Path, model, optimizer, step: int, args, include_optim
     torch.save(payload, path)
 
 
+def write_checkpoint_manifest(path: Path, *, step: int, kind: str, include_optimizer: bool):
+    payload = {
+        "step": step,
+        "kind": kind,
+        "include_optimizer": include_optimizer,
+        "created_at_unix": int(time.time()),
+    }
+    (path / "checkpoint_manifest.json").write_text(json.dumps(payload, indent=2))
+
+
 def load_checkpoint(path: Path, model, optimizer=None):
     ckpt = torch.load(path, map_location="cpu")
     raw_model = model.module if isinstance(model, DDP) else model
@@ -310,38 +345,102 @@ def prune_milestones(output_dir: Path, keep: int):
 
 
 def main():
+    process_start = time.perf_counter()
     args = parse_args()
+    emit_status(
+        "startup.args_parsed",
+        distributed_env=("RANK" in os.environ),
+        train_data=str(args.train_data),
+        val_data=(str(args.val_data) if args.val_data is not None else None),
+        output_dir=str(args.output_dir),
+        max_steps=args.max_steps,
+        log_every=args.log_every,
+        wandb=args.wandb,
+        wandb_console=args.wandb_console,
+    )
+
+    phase_start = time.perf_counter()
+    emit_status("distributed.init.begin")
     distributed, rank, world_size, local_rank = setup_distributed()
+    emit_status(
+        "distributed.init.end",
+        rank=rank,
+        duration_sec=round(time.perf_counter() - phase_start, 3),
+        distributed=distributed,
+        world_size=world_size,
+        local_rank=local_rank,
+    )
     device = torch.device(f"cuda:{local_rank}" if distributed else args.device)
+    emit_status("runtime.device_ready", rank=rank, device=str(device), dtype=args.dtype)
+
+    phase_start = time.perf_counter()
     torch.manual_seed(args.seed + rank)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(args.seed + rank)
+    emit_status("runtime.seeded", rank=rank, duration_sec=round(time.perf_counter() - phase_start, 3), seed=args.seed + rank)
 
     assert args.global_batch_size % (args.micro_batch_size * world_size) == 0
     grad_accum_steps = args.global_batch_size // (args.micro_batch_size * world_size)
+    emit_status("runtime.batch_shape_ready", rank=rank, grad_accum_steps=grad_accum_steps)
 
+    phase_start = time.perf_counter()
+    emit_status("dataset.open.begin", rank=rank)
     train_data = PackedTokenDataset(args.train_data, args.token_dtype)
     val_data = PackedTokenDataset(args.val_data, args.token_dtype) if args.val_data is not None else None
+    emit_status(
+        "dataset.open.end",
+        rank=rank,
+        duration_sec=round(time.perf_counter() - phase_start, 3),
+        train_tokens=train_data.size,
+        val_tokens=(val_data.size if val_data is not None else None),
+    )
 
+    phase_start = time.perf_counter()
+    emit_status("model.init.begin", rank=rank, model_layer=args.model_layer)
     config = make_config(args)
     model = MambaLMHeadModel(config=config, device=device, dtype=get_dtype(args.dtype))
+    emit_status(
+        "model.init.end",
+        rank=rank,
+        duration_sec=round(time.perf_counter() - phase_start, 3),
+        param_count=count_parameters(model),
+    )
     if args.compile:
+        compile_start = time.perf_counter()
+        emit_status("model.compile.begin", rank=rank)
         model = torch.compile(model)
+        emit_status("model.compile.end", rank=rank, duration_sec=round(time.perf_counter() - compile_start, 3))
     model.train()
 
+    phase_start = time.perf_counter()
+    emit_status("optimizer.init.begin", rank=rank)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
         betas=tuple(args.betas),
         weight_decay=args.weight_decay,
     )
+    emit_status("optimizer.init.end", rank=rank, duration_sec=round(time.perf_counter() - phase_start, 3))
 
     start_step = 0
     if args.resume is not None:
+        phase_start = time.perf_counter()
+        emit_status("checkpoint.resume.begin", rank=rank, path=str(args.resume))
         start_step = load_checkpoint(args.resume, model, optimizer)
+        emit_status(
+            "checkpoint.resume.end",
+            rank=rank,
+            duration_sec=round(time.perf_counter() - phase_start, 3),
+            resumed_step=start_step,
+        )
+    else:
+        emit_status("checkpoint.resume.skipped", rank=rank)
 
     if distributed:
+        phase_start = time.perf_counter()
+        emit_status("ddp.wrap.begin", rank=rank)
         model = DDP(model, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+        emit_status("ddp.wrap.end", rank=rank, duration_sec=round(time.perf_counter() - phase_start, 3))
 
     scaler = torch.amp.GradScaler("cuda", enabled=(args.dtype == "fp16" and device.type == "cuda"))
     amp_dtype = get_dtype(args.dtype)
@@ -353,6 +452,8 @@ def main():
 
     wandb_run = None
     if args.wandb and is_master(rank):
+        phase_start = time.perf_counter()
+        emit_status("wandb.init.begin", rank=rank)
         try:
             import wandb
         except ModuleNotFoundError as exc:
@@ -368,13 +469,35 @@ def main():
             name=args.wandb_name,
             group=args.wandb_group,
             config=vars(args),
+            settings=wandb.Settings(console=args.wandb_console),
         )
+        emit_status(
+            "wandb.init.end",
+            rank=rank,
+            duration_sec=round(time.perf_counter() - phase_start, 3),
+            run_id=wandb_run.id,
+            run_name=wandb_run.name,
+            run_url=wandb_run.url,
+        )
+    elif is_master(rank):
+        emit_status("wandb.init.skipped", rank=rank)
 
     tokens_per_step = args.global_batch_size * args.seq_len
     last_log_time = time.time()
     best_val_loss: Optional[float] = None
+    emit_status(
+        "train.loop.begin",
+        rank=rank,
+        startup_sec=round(time.perf_counter() - process_start, 3),
+        start_step=start_step,
+        max_steps=args.max_steps,
+        tokens_per_step=tokens_per_step,
+    )
 
     for step in range(start_step, args.max_steps):
+        if is_master(rank) and step == start_step:
+            step_start = time.perf_counter()
+            emit_status("train.first_step.begin", rank=rank, step=step)
         lr = lr_for_step(step, args)
         for group in optimizer.param_groups:
             group["lr"] = lr
@@ -402,6 +525,15 @@ def main():
 
         if distributed:
             dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+
+        if is_master(rank) and step == start_step:
+            emit_status(
+                "train.first_step.end",
+                rank=rank,
+                step=step,
+                duration_sec=round(time.perf_counter() - step_start, 3),
+                loss=float(loss_accum.item()),
+            )
 
         if is_master(rank) and step % args.log_every == 0:
             now = time.time()
@@ -445,6 +577,7 @@ def main():
                     )
                     raw_model = model.module if isinstance(model, DDP) else model
                     raw_model.save_pretrained(tmp_dir)
+                    write_checkpoint_manifest(tmp_dir, step=step, kind="best", include_optimizer=False)
                     (tmp_dir / "metrics.json").write_text(json.dumps({"step": step, "val/loss": best_val_loss}, indent=2))
                     replace_dir(tmp_dir, best_dir)
                     shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -465,6 +598,12 @@ def main():
             )
             raw_model = model.module if isinstance(model, DDP) else model
             raw_model.save_pretrained(tmp_latest)
+            write_checkpoint_manifest(
+                tmp_latest,
+                step=step,
+                kind="latest",
+                include_optimizer=args.save_optimizer_latest_only,
+            )
             replace_dir(tmp_latest, latest_dir)
             shutil.rmtree(tmp_latest, ignore_errors=True)
 
@@ -478,6 +617,7 @@ def main():
                     ckpt = torch.load(trainer_path, map_location="cpu")
                     ckpt.pop("optimizer", None)
                     torch.save(ckpt, trainer_path)
+                write_checkpoint_manifest(milestone_dir, step=step, kind="milestone", include_optimizer=False)
                 prune_milestones(args.output_dir, args.keep_milestones)
 
             lm_eval_result = maybe_run_lm_eval(args, latest_dir, step)
@@ -491,6 +631,8 @@ def main():
                     wandb_run.log(summary, step=step)
 
     if is_master(rank):
+        phase_start = time.perf_counter()
+        emit_status("checkpoint.final.begin", rank=rank, step=args.max_steps)
         ckpt_dir = args.output_dir / "latest"
         tmp_dir = args.output_dir / ".final_build"
         if tmp_dir.exists():
@@ -506,12 +648,32 @@ def main():
         )
         raw_model = model.module if isinstance(model, DDP) else model
         raw_model.save_pretrained(tmp_dir)
+        write_checkpoint_manifest(
+            tmp_dir,
+            step=args.max_steps,
+            kind="latest",
+            include_optimizer=args.save_optimizer_latest_only,
+        )
         replace_dir(tmp_dir, ckpt_dir)
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        emit_status(
+            "checkpoint.final.end",
+            rank=rank,
+            duration_sec=round(time.perf_counter() - phase_start, 3),
+            step=args.max_steps,
+        )
+
+    if wandb_run is not None:
+        phase_start = time.perf_counter()
+        emit_status("wandb.finish.begin", rank=rank)
+        wandb_run.finish()
+        emit_status("wandb.finish.end", rank=rank, duration_sec=round(time.perf_counter() - phase_start, 3))
 
     if distributed:
+        emit_status("distributed.shutdown.begin", rank=rank)
         dist.barrier()
         dist.destroy_process_group()
+        emit_status("distributed.shutdown.end", rank=rank)
 
 
 if __name__ == "__main__":

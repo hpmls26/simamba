@@ -29,7 +29,10 @@ Repository = "https://github.com/state-spaces/mamba"
 
 [project.optional-dependencies]
 train = [
-    "wandb"
+    "wandb",
+    "google-cloud-storage",
+    "datasets",
+    "zstandard",
 ]
 causal-conv1d = [
     "causal-conv1d>=1.2.0,<1.6; python_version < '3.10'",
@@ -45,6 +48,9 @@ mamba3 = [
 ]
 full = [
     "wandb",
+    "google-cloud-storage",
+    "datasets",
+    "zstandard",
     "causal-conv1d>=1.2.0,<1.6; python_version < '3.10'",
     "causal-conv1d>=1.6.0; python_version >= '3.10'",
     "triton>=3.5.0",

@@ -376,3 +376,39 @@ If you use this codebase, or otherwise find our work valuable, please cite Mamba
   If you want, I can also give you a single copy-paste block that submits prep first, waits for it, then submits the
   GPU smoke run
   automatically.
+
+## 130M training with async GCS checkpoint export
+
+The long-running launcher is:
+
+```bash
+scripts/run_train_simamba_130m.sh
+```
+
+It now defaults to the same `burst` 4-GPU shape used by the working smoke run, validates that the visible GPUs match `A6000`, writes W&B scratch files under the training output directory instead of the repo root, and saves model-only milestone checkpoints every 25 steps for asynchronous export.
+
+Before submitting, make sure these variables are available in the batch environment:
+
+```bash
+export WANDB_API_KEY='...'
+export WANDB_ENTITY='ssb2234-columbia'
+export WANDB_PROJECT='simamba'
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json  # if needed
+export GCS_BUCKET=<bucket-name>
+```
+
+Then submit:
+
+```bash
+sbatch --export=ALL scripts/run_train_simamba_130m.sh /path/train.bin /path/val.bin /path/output_dir
+```
+
+Notes:
+
+- The async exporter uploads `step_*` milestone archives to `GCS_PREFIX/GCS_RUN_PREFIX/checkpoints` in the configured bucket.
+- `GCS_RUN_PREFIX` defaults to `$(basename OUTPUT_DIR)` and can be overridden explicitly.
+- `GCS_PREFIX` is optional and lets you place runs under a shared object prefix.
+- If `OUTPUT_DIR/latest/trainer.pt` is missing at startup and `GCS_RESTORE_IF_MISSING=1`, the launcher synchronously restores the newest uploaded `step_*.tar` milestone from GCS into `OUTPUT_DIR/latest` before training starts.
+- That remote restore brings back model weights and step number, but not optimizer state, because exported `step_*` milestones are model-only.
+- The uploader uses resumable GCS session URIs and persists session state locally so interrupted uploads can continue without restarting the whole archive transfer.
+- If you need to disable remote export for a one-off run, set `GCS_EXPORT=0`.
