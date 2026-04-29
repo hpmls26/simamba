@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -68,6 +69,7 @@ def parse_args():
     parser.add_argument("--simamba-ngroups", type=int, default=1)
     parser.add_argument("--simamba-rope-fraction", type=float, default=0.5)
     parser.add_argument("--simamba-chunk-size", type=int, default=64)
+    parser.add_argument("--simamba-recompute-chunk-size", type=int, default=None)
     parser.add_argument("--simamba-use-midpoint-control", action="store_true")
     parser.add_argument("--simamba-backend", choices=["reference", "triton"], default="triton")
     parser.add_argument("--simamba-outproj-norm", action="store_true")
@@ -120,6 +122,13 @@ def parse_args():
     parser.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY"))
     parser.add_argument("--wandb-name", default=None)
     parser.add_argument("--wandb-group", default=None)
+    parser.add_argument("--wandb-id", default=None, help="Optional W&B run ID to resume explicitly.")
+    parser.add_argument(
+        "--wandb-resume",
+        choices=["allow", "never", "must", "auto"],
+        default=None,
+        help="Optional W&B resume policy when --wandb-id is set or recovered from a checkpoint.",
+    )
     parser.add_argument(
         "--wandb-console",
         choices=["auto", "off", "wrap", "redirect", "wrap_raw", "wrap_emu"],
@@ -185,6 +194,7 @@ def make_config(args):
             "ngroups": args.simamba_ngroups,
             "rope_fraction": args.simamba_rope_fraction,
             "chunk_size": args.simamba_chunk_size,
+            "recompute_chunk_size": args.simamba_recompute_chunk_size,
             "use_midpoint_control": args.simamba_use_midpoint_control,
             "simamba_backend": args.simamba_backend,
             "is_outproj_norm": args.simamba_outproj_norm,
@@ -244,37 +254,97 @@ def lr_for_step(step: int, args):
     return args.min_lr + (args.lr - args.min_lr) * cosine
 
 
-def save_checkpoint(path: Path, model, optimizer, step: int, args, include_optimizer: bool):
+def build_wandb_metadata(wandb_run, args):
+    if wandb_run is None:
+        return None
+    return {
+        "id": wandb_run.id,
+        "name": wandb_run.name,
+        "entity": args.wandb_entity,
+        "project": args.wandb_project,
+        "group": getattr(wandb_run, "group", None) or args.wandb_group,
+        "url": getattr(wandb_run, "url", None),
+    }
+
+
+def write_wandb_resume_metadata(path: Path, wandb_metadata):
+    if wandb_metadata is None:
+        return
+    (path / "wandb_run.json").write_text(json.dumps(wandb_metadata, indent=2))
+
+
+def save_checkpoint(
+    path: Path,
+    model,
+    optimizer,
+    resume_step: int,
+    args,
+    include_optimizer: bool,
+    *,
+    completed_step: Optional[int] = None,
+    wandb_metadata=None,
+):
     raw_model = model.module if isinstance(model, DDP) else model
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "model": raw_model.state_dict(),
-        "step": step,
+        "step": resume_step,
+        "resume_step": resume_step,
+        "completed_step": completed_step,
         "args": vars(args),
         "config": asdict(raw_model.config),
     }
+    if wandb_metadata is not None:
+        payload["wandb"] = wandb_metadata
     if include_optimizer:
         payload["optimizer"] = optimizer.state_dict()
     torch.save(payload, path)
 
 
-def write_checkpoint_manifest(path: Path, *, step: int, kind: str, include_optimizer: bool):
+def write_checkpoint_manifest(
+    path: Path,
+    *,
+    step: int,
+    kind: str,
+    include_optimizer: bool,
+    resume_step: Optional[int] = None,
+    wandb_id: Optional[str] = None,
+):
     payload = {
         "step": step,
         "kind": kind,
         "include_optimizer": include_optimizer,
         "created_at_unix": int(time.time()),
     }
+    if resume_step is not None:
+        payload["resume_step"] = resume_step
+    if wandb_id is not None:
+        payload["wandb_id"] = wandb_id
     (path / "checkpoint_manifest.json").write_text(json.dumps(payload, indent=2))
 
 
 def load_checkpoint(path: Path, model, optimizer=None):
-    ckpt = torch.load(path, map_location="cpu")
+    # trainer.pt is a trusted local checkpoint that includes optimizer state,
+    # Paths, and other non-tensor metadata, so weights_only=False is required
+    # on PyTorch 2.6+.
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
     raw_model = model.module if isinstance(model, DDP) else model
     raw_model.load_state_dict(ckpt["model"])
     if optimizer is not None and "optimizer" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer"])
-    return int(ckpt.get("step", 0))
+    if "resume_step" in ckpt:
+        resume_step = int(ckpt["resume_step"])
+        completed_step = ckpt.get("completed_step")
+    else:
+        # Backward compatibility for checkpoints written before resume_step was
+        # introduced. Those files stored the last completed step as "step".
+        completed_step = ckpt.get("step")
+        resume_step = (int(completed_step) + 1) if completed_step is not None else 0
+    return {
+        "resume_step": resume_step,
+        "completed_step": completed_step,
+        "wandb": ckpt.get("wandb"),
+    }
 
 
 @torch.no_grad()
@@ -342,6 +412,44 @@ def prune_milestones(output_dir: Path, keep: int):
     milestones = list_milestones(output_dir)
     for path in milestones[:-keep]:
         shutil.rmtree(path)
+
+
+def save_training_snapshot(
+    checkpoint_dir: Path,
+    *,
+    model,
+    optimizer,
+    resume_step: int,
+    completed_step: Optional[int],
+    args,
+    include_optimizer: bool,
+    kind: str,
+    wandb_metadata,
+):
+    if checkpoint_dir.exists():
+        shutil.rmtree(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    save_checkpoint(
+        checkpoint_dir / "trainer.pt",
+        model,
+        optimizer,
+        resume_step,
+        args,
+        include_optimizer=include_optimizer,
+        completed_step=completed_step,
+        wandb_metadata=wandb_metadata,
+    )
+    raw_model = model.module if isinstance(model, DDP) else model
+    raw_model.save_pretrained(checkpoint_dir)
+    write_checkpoint_manifest(
+        checkpoint_dir,
+        step=resume_step,
+        kind=kind,
+        include_optimizer=include_optimizer,
+        resume_step=resume_step,
+        wandb_id=(wandb_metadata or {}).get("id"),
+    )
+    write_wandb_resume_metadata(checkpoint_dir, wandb_metadata)
 
 
 def main():
@@ -423,10 +531,13 @@ def main():
     emit_status("optimizer.init.end", rank=rank, duration_sec=round(time.perf_counter() - phase_start, 3))
 
     start_step = 0
+    resume_wandb = None
     if args.resume is not None:
         phase_start = time.perf_counter()
         emit_status("checkpoint.resume.begin", rank=rank, path=str(args.resume))
-        start_step = load_checkpoint(args.resume, model, optimizer)
+        resume_state = load_checkpoint(args.resume, model, optimizer)
+        start_step = resume_state["resume_step"]
+        resume_wandb = resume_state.get("wandb")
         emit_status(
             "checkpoint.resume.end",
             rank=rank,
@@ -463,11 +574,20 @@ def main():
                 "or sync the optional 'train' dependencies declared in pyproject.toml."
             ) from exc
 
+        effective_wandb = resume_wandb or {}
+        wandb_id = args.wandb_id or effective_wandb.get("id")
+        wandb_resume = args.wandb_resume or ("allow" if wandb_id is not None else None)
+        wandb_name = effective_wandb.get("name") if wandb_id is not None else args.wandb_name
+        wandb_group = effective_wandb.get("group") if wandb_id is not None else args.wandb_group
+        wandb_project = effective_wandb.get("project") if wandb_id is not None else args.wandb_project
+        wandb_entity = effective_wandb.get("entity") if wandb_id is not None else args.wandb_entity
         wandb_run = wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=args.wandb_name,
-            group=args.wandb_group,
+            project=wandb_project,
+            entity=wandb_entity,
+            id=wandb_id,
+            resume=wandb_resume,
+            name=wandb_name,
+            group=wandb_group,
             config=vars(args),
             settings=wandb.Settings(console=args.wandb_console),
         )
@@ -494,7 +614,23 @@ def main():
         tokens_per_step=tokens_per_step,
     )
 
+    stop_requested = False
+    stop_signal = None
+
+    def _request_stop(signum, _frame):
+        nonlocal stop_requested, stop_signal
+        stop_requested = True
+        stop_signal = signal.Signals(signum).name
+        emit_status("runtime.stop_requested", rank=rank, signal=stop_signal)
+
+    signal.signal(signal.SIGTERM, _request_stop)
+    signal.signal(signal.SIGINT, _request_stop)
+
+    next_step_to_run = start_step
+
     for step in range(start_step, args.max_steps):
+        if stop_requested:
+            break
         if is_master(rank) and step == start_step:
             step_start = time.perf_counter()
             emit_status("train.first_step.begin", rank=rank, step=step)
@@ -505,14 +641,34 @@ def main():
         optimizer.zero_grad(set_to_none=True)
         loss_accum = torch.zeros((), device=device)
 
-        for _ in range(grad_accum_steps):
-            x, y = train_data.sample_batch(args.micro_batch_size, args.seq_len, device)
-            with amp_ctx():
-                logits = model(x).logits
-                loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
-                loss = loss / grad_accum_steps
-            loss_accum += loss.detach()
-            scaler.scale(loss).backward()
+        for micro_step in range(grad_accum_steps):
+            if is_master(rank) and step == start_step:
+                micro_step_start = time.perf_counter()
+                emit_status(
+                    "train.first_step.microbatch.begin",
+                    rank=rank,
+                    step=step,
+                    micro_step=micro_step,
+                    grad_accum_steps=grad_accum_steps,
+                )
+            sync_context = model.no_sync() if distributed and micro_step + 1 < grad_accum_steps else nullcontext()
+            with sync_context:
+                x, y = train_data.sample_batch(args.micro_batch_size, args.seq_len, device)
+                with amp_ctx():
+                    logits = model(x).logits
+                    loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
+                    loss = loss / grad_accum_steps
+                loss_accum += loss.detach()
+                scaler.scale(loss).backward()
+            if is_master(rank) and step == start_step:
+                emit_status(
+                    "train.first_step.microbatch.end",
+                    rank=rank,
+                    step=step,
+                    micro_step=micro_step,
+                    duration_sec=round(time.perf_counter() - micro_step_start, 3),
+                    loss=float(loss.detach().item() * grad_accum_steps),
+                )
 
         if args.grad_clip > 0:
             scaler.unscale_(optimizer)
@@ -525,6 +681,8 @@ def main():
 
         if distributed:
             dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+
+        next_step_to_run = step + 1
 
         if is_master(rank) and step == start_step:
             emit_status(
@@ -566,18 +724,18 @@ def main():
                     tmp_dir = args.output_dir / ".best_build"
                     if tmp_dir.exists():
                         shutil.rmtree(tmp_dir)
-                    tmp_dir.mkdir(parents=True, exist_ok=True)
-                    save_checkpoint(
-                        tmp_dir / "trainer.pt",
-                        model,
-                        optimizer,
-                        step,
-                        args,
+                    wandb_metadata = build_wandb_metadata(wandb_run, args)
+                    save_training_snapshot(
+                        tmp_dir,
+                        model=model,
+                        optimizer=optimizer,
+                        resume_step=step + 1,
+                        completed_step=step,
+                        args=args,
                         include_optimizer=False,
+                        kind="best",
+                        wandb_metadata=wandb_metadata,
                     )
-                    raw_model = model.module if isinstance(model, DDP) else model
-                    raw_model.save_pretrained(tmp_dir)
-                    write_checkpoint_manifest(tmp_dir, step=step, kind="best", include_optimizer=False)
                     (tmp_dir / "metrics.json").write_text(json.dumps({"step": step, "val/loss": best_val_loss}, indent=2))
                     replace_dir(tmp_dir, best_dir)
                     shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -587,25 +745,21 @@ def main():
             tmp_latest = args.output_dir / ".latest_build"
             if tmp_latest.exists():
                 shutil.rmtree(tmp_latest)
-            tmp_latest.mkdir(parents=True, exist_ok=True)
-            save_checkpoint(
-                tmp_latest / "trainer.pt",
-                model,
-                optimizer,
-                step,
-                args,
-                include_optimizer=args.save_optimizer_latest_only,
-            )
-            raw_model = model.module if isinstance(model, DDP) else model
-            raw_model.save_pretrained(tmp_latest)
-            write_checkpoint_manifest(
+            wandb_metadata = build_wandb_metadata(wandb_run, args)
+            save_training_snapshot(
                 tmp_latest,
-                step=step,
-                kind="latest",
+                model=model,
+                optimizer=optimizer,
+                resume_step=step + 1,
+                completed_step=step,
+                args=args,
                 include_optimizer=args.save_optimizer_latest_only,
+                kind="latest",
+                wandb_metadata=wandb_metadata,
             )
             replace_dir(tmp_latest, latest_dir)
             shutil.rmtree(tmp_latest, ignore_errors=True)
+            write_wandb_resume_metadata(args.output_dir, wandb_metadata)
 
             milestone_dir = args.output_dir / f"step_{step:07d}"
             if args.keep_milestones > 0:
@@ -614,10 +768,17 @@ def main():
                 shutil.copytree(latest_dir, milestone_dir)
                 trainer_path = milestone_dir / "trainer.pt"
                 if trainer_path.exists() and args.save_optimizer_latest_only:
-                    ckpt = torch.load(trainer_path, map_location="cpu")
+                    ckpt = torch.load(trainer_path, map_location="cpu", weights_only=False)
                     ckpt.pop("optimizer", None)
                     torch.save(ckpt, trainer_path)
-                write_checkpoint_manifest(milestone_dir, step=step, kind="milestone", include_optimizer=False)
+                write_checkpoint_manifest(
+                    milestone_dir,
+                    step=step + 1,
+                    kind="milestone",
+                    include_optimizer=False,
+                    resume_step=step + 1,
+                    wandb_id=(wandb_metadata or {}).get("id"),
+                )
                 prune_milestones(args.output_dir, args.keep_milestones)
 
             lm_eval_result = maybe_run_lm_eval(args, latest_dir, step)
@@ -630,37 +791,46 @@ def main():
                 if wandb_run is not None:
                     wandb_run.log(summary, step=step)
 
+        if stop_requested:
+            break
+
+    completed_all_steps = next_step_to_run >= args.max_steps
     if is_master(rank):
         phase_start = time.perf_counter()
-        emit_status("checkpoint.final.begin", rank=rank, step=args.max_steps)
+        checkpoint_step = args.max_steps if completed_all_steps else next_step_to_run
+        emit_status(
+            "checkpoint.final.begin",
+            rank=rank,
+            step=checkpoint_step,
+            interrupted=(not completed_all_steps),
+            signal=stop_signal,
+        )
         ckpt_dir = args.output_dir / "latest"
         tmp_dir = args.output_dir / ".final_build"
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir)
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        save_checkpoint(
-            tmp_dir / "trainer.pt",
-            model,
-            optimizer,
-            args.max_steps,
-            args,
-            include_optimizer=args.save_optimizer_latest_only,
-        )
-        raw_model = model.module if isinstance(model, DDP) else model
-        raw_model.save_pretrained(tmp_dir)
-        write_checkpoint_manifest(
+        wandb_metadata = build_wandb_metadata(wandb_run, args)
+        save_training_snapshot(
             tmp_dir,
-            step=args.max_steps,
-            kind="latest",
+            model=model,
+            optimizer=optimizer,
+            resume_step=checkpoint_step,
+            completed_step=(checkpoint_step - 1 if checkpoint_step > 0 else None),
+            args=args,
             include_optimizer=args.save_optimizer_latest_only,
+            kind="latest",
+            wandb_metadata=wandb_metadata,
         )
         replace_dir(tmp_dir, ckpt_dir)
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        write_wandb_resume_metadata(args.output_dir, wandb_metadata)
         emit_status(
             "checkpoint.final.end",
             rank=rank,
             duration_sec=round(time.perf_counter() - phase_start, 3),
-            step=args.max_steps,
+            step=checkpoint_step,
+            interrupted=(not completed_all_steps),
+            signal=stop_signal,
         )
 
     if wandb_run is not None:

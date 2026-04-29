@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --account=edu
-#SBATCH --partition=burst
+#SBATCH --partition=short
 #SBATCH --job-name=Simamba130MTrain
 #SBATCH --output=/insomnia001/home/ssb2234/logs/%x-%j.out
 #SBATCH --error=/insomnia001/home/ssb2234/logs/%x-%j.err
@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:A6000:4
 #SBATCH --ntasks=1
 #SBATCH -c 4
-#SBATCH --time=1-00:00
+#SBATCH --time=0-12:00
 #SBATCH --mem-per-cpu=8G
 
 set -euo pipefail
@@ -71,29 +71,45 @@ log_phase() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
 }
 
+print_usage() {
+  cat >&2 <<'EOF'
+usage: bash scripts/run_train_simamba_130m.sh TRAIN_BIN [VAL_BIN] OUTPUT_DIR [options]
+
+options:
+  --bucket NAME                  Override the GCS bucket used for restore/export.
+  --gcs-export 0|1               Enable or disable async checkpoint export.
+  --gcs-restore-if-missing 0|1   Attempt GCS restore when no local latest checkpoint exists.
+  --resume PATH                  Resume from a specific trainer.pt checkpoint.
+  --gpus N                       Override the visible GPU count expected by the launcher.
+  --expected-gpu-name NAME       Override the GPU model substring check.
+  --wandb-project NAME           Override the W&B project name.
+  --wandb-entity NAME            Override the W&B entity.
+  --wandb-name NAME              Override the W&B run name.
+  --wandb-group NAME             Override the W&B run group.
+  --wandb-id ID                  Resume a specific W&B run ID.
+  --wandb-resume POLICY          W&B resume policy: allow, must, never, or auto.
+  -h, --help                     Show this help text.
+EOF
+}
+
 export PYTHONNOUSERSITE=1
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 # Single-node Simamba pretraining launcher tuned to mirror the known-good
 # 4x burst GPU smoke job while keeping checkpoint exports off the training
 # critical path.
-#
-# Usage:
-WANDB_API_KEY='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'
-WANDB_ENTITY=ssb2234-columbia
-WANDB_PROJECT=simamba
-GOOGLE_APPLICATION_CREDENTIALS=/insomnia001/home/ssb2234/mamba/scripts/gcs-key.json  # if needed
-GCS_BUCKET=hpml-model-checkpoints
-#   sbatch --export=ALL scripts/run_train_simamba_130m.sh /path/train.bin [/path/val.bin] /path/output_dir
 #
 # Optional environment overrides:
 #   GPUS=4
 #   EXPECTED_GPU_NAME=A6000
 #   SEQ_LEN=2048
 #   GLOBAL_BATCH_SIZE=32
-#   MICRO_BATCH_SIZE=4
+#   MICRO_BATCH_SIZE=1
+#   SIMAMBA_CHUNK_SIZE=64
+#   SIMAMBA_RECOMPUTE_CHUNK_SIZE=512  # Defaulted automatically for MICRO_BATCH_SIZE=1
 #   MAX_STEPS=10000
 #   SAVE_EVERY=25
 #   EVAL_EVERY=500
@@ -108,6 +124,101 @@ GCS_BUCKET=hpml-model-checkpoints
 #   GCS_PROJECT=my-project
 #   GCS_RESTORE_IF_MISSING=1
 
+DEFAULT_WANDB_API_KEY='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'
+DEFAULT_WANDB_ENTITY='ssb2234-columbia'
+DEFAULT_WANDB_PROJECT='simamba'
+DEFAULT_GCS_BUCKET='hpml-model-checkpoints'
+DEFAULT_GCS_CREDENTIALS="${REPO_ROOT}/scripts/gcs-key.json"
+
+POSITIONAL_ARGS=()
+CLI_GCS_BUCKET=""
+CLI_GCS_EXPORT=""
+CLI_GCS_RESTORE_IF_MISSING=""
+CLI_RESUME_CHECKPOINT=""
+CLI_GPUS=""
+CLI_EXPECTED_GPU_NAME=""
+CLI_WANDB_PROJECT=""
+CLI_WANDB_ENTITY=""
+CLI_WANDB_NAME=""
+CLI_WANDB_GROUP=""
+CLI_WANDB_ID=""
+CLI_WANDB_RESUME=""
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --bucket)
+      CLI_GCS_BUCKET="${2:?missing value for --bucket}"
+      shift 2
+      ;;
+    --gcs-export)
+      CLI_GCS_EXPORT="${2:?missing value for --gcs-export}"
+      shift 2
+      ;;
+    --gcs-restore-if-missing)
+      CLI_GCS_RESTORE_IF_MISSING="${2:?missing value for --gcs-restore-if-missing}"
+      shift 2
+      ;;
+    --resume)
+      CLI_RESUME_CHECKPOINT="${2:?missing value for --resume}"
+      shift 2
+      ;;
+    --gpus)
+      CLI_GPUS="${2:?missing value for --gpus}"
+      shift 2
+      ;;
+    --expected-gpu-name)
+      CLI_EXPECTED_GPU_NAME="${2:?missing value for --expected-gpu-name}"
+      shift 2
+      ;;
+    --wandb-project)
+      CLI_WANDB_PROJECT="${2:?missing value for --wandb-project}"
+      shift 2
+      ;;
+    --wandb-entity)
+      CLI_WANDB_ENTITY="${2:?missing value for --wandb-entity}"
+      shift 2
+      ;;
+    --wandb-name)
+      CLI_WANDB_NAME="${2:?missing value for --wandb-name}"
+      shift 2
+      ;;
+    --wandb-group)
+      CLI_WANDB_GROUP="${2:?missing value for --wandb-group}"
+      shift 2
+      ;;
+    --wandb-id)
+      CLI_WANDB_ID="${2:?missing value for --wandb-id}"
+      shift 2
+      ;;
+    --wandb-resume)
+      CLI_WANDB_RESUME="${2:?missing value for --wandb-resume}"
+      shift 2
+      ;;
+    -h|--help)
+      print_usage
+      exit 0
+      ;;
+    --)
+      shift
+      while [[ "$#" -gt 0 ]]; do
+        POSITIONAL_ARGS+=("$1")
+        shift
+      done
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      print_usage
+      exit 1
+      ;;
+    *)
+      POSITIONAL_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+set -- "${POSITIONAL_ARGS[@]}"
+
 case "$#" in
   2)
     TRAIN_DATA="$1"
@@ -120,7 +231,7 @@ case "$#" in
     OUTPUT_DIR="$3"
     ;;
   *)
-    echo "usage: bash scripts/run_train_simamba_130m.sh TRAIN_BIN [VAL_BIN] OUTPUT_DIR" >&2
+    print_usage
     exit 1
     ;;
 esac
@@ -135,7 +246,16 @@ if [[ -n "${VAL_DATA}" && ! -f "${VAL_DATA}" ]]; then
   exit 1
 fi
 
-if [[ -z "${WANDB_API_KEY:-}" ]]; then
+if [[ -f "${DEFAULT_GCS_CREDENTIALS}" ]]; then
+  export GOOGLE_APPLICATION_CREDENTIALS="${GOOGLE_APPLICATION_CREDENTIALS:-${DEFAULT_GCS_CREDENTIALS}}"
+fi
+
+export WANDB_API_KEY="${WANDB_API_KEY:-${DEFAULT_WANDB_API_KEY}}"
+export WANDB_ENTITY="${CLI_WANDB_ENTITY:-${WANDB_ENTITY:-${DEFAULT_WANDB_ENTITY}}}"
+export WANDB_PROJECT="${CLI_WANDB_PROJECT:-${WANDB_PROJECT:-${DEFAULT_WANDB_PROJECT}}}"
+export GCS_BUCKET="${CLI_GCS_BUCKET:-${GCS_BUCKET:-${DEFAULT_GCS_BUCKET}}}"
+
+if [[ -z "${WANDB_API_KEY}" ]]; then
   echo "WANDB_API_KEY is not set. Export it before running or submit with sbatch --export=ALL." >&2
   exit 1
 fi
@@ -157,23 +277,48 @@ detect_allocated_gpus() {
   echo ""
 }
 
-validate_gpu_model() {
-  local expected_name="$1"
-  if [[ -z "${expected_name}" ]]; then
+query_visible_gpu_inventory() {
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
     return
   fi
+  local query_output status
+  query_output="$(nvidia-smi --query-gpu=name,gpu_bus_id --format=csv,noheader 2>&1)"
+  status=$?
+  if [[ ${status} -ne 0 || "${query_output}" == *"Unable to determine the device handle"* || "${query_output}" == *"Unknown Error"* ]]; then
+    echo "${query_output}" >&2
+    echo "GPU preflight failed before Python startup: nvidia-smi reported an unhealthy or inaccessible GPU in the current allocation." >&2
+    echo "Release this job and request a fresh allocation before rerunning training." >&2
+    exit 1
+  fi
+  printf '%s\n' "${query_output}"
+}
+
+validate_gpu_inventory() {
+  local expected_name="$1"
+  local expected_gpus="$2"
+  local gpu_inventory
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     echo "nvidia-smi is unavailable; skipping GPU model validation." >&2
     return
   fi
 
-  mapfile -t gpu_names < <(nvidia-smi --query-gpu=name --format=csv,noheader)
-  if [[ "${#gpu_names[@]}" -eq 0 ]]; then
+  mapfile -t gpu_inventory < <(query_visible_gpu_inventory)
+  if [[ "${#gpu_inventory[@]}" -eq 0 ]]; then
     echo "Unable to detect visible GPU names with nvidia-smi." >&2
     exit 1
   fi
+  if [[ "${#gpu_inventory[@]}" -ne "${expected_gpus}" ]]; then
+    echo "GPU mismatch: launcher expects ${expected_gpus} visible GPUs, but nvidia-smi reports ${#gpu_inventory[@]} healthy GPUs in this allocation." >&2
+    printf 'nvidia-smi visible GPUs:\n%s\n' "${gpu_inventory[*]}" >&2
+    exit 1
+  fi
 
-  for gpu_name in "${gpu_names[@]}"; do
+  if [[ -z "${expected_name}" ]]; then
+    return
+  fi
+
+  local gpu_name
+  for gpu_name in "${gpu_inventory[@]}"; do
     if [[ "${gpu_name}" != *"${expected_name}"* ]]; then
       echo "Expected GPUs matching '${expected_name}', but found '${gpu_name}'." >&2
       exit 1
@@ -182,8 +327,8 @@ validate_gpu_model() {
 }
 
 ALLOCATED_GPUS="$(detect_allocated_gpus)"
-GPUS="${GPUS:-${ALLOCATED_GPUS:-4}}"
-EXPECTED_GPU_NAME="${EXPECTED_GPU_NAME:-A6000}"
+GPUS="${CLI_GPUS:-${GPUS:-${ALLOCATED_GPUS:-4}}}"
+EXPECTED_GPU_NAME="${CLI_EXPECTED_GPU_NAME:-${EXPECTED_GPU_NAME:-A6000}}"
 
 if [[ -n "${ALLOCATED_GPUS}" && "${ALLOCATED_GPUS}" != "${GPUS}" ]]; then
   echo "GPU mismatch: launcher is configured for GPUS=${GPUS}, but the allocation exposes ${ALLOCATED_GPUS} GPUs." >&2
@@ -191,31 +336,66 @@ if [[ -n "${ALLOCATED_GPUS}" && "${ALLOCATED_GPUS}" != "${GPUS}" ]]; then
   exit 1
 fi
 
-validate_gpu_model "${EXPECTED_GPU_NAME}"
+validate_gpu_inventory "${EXPECTED_GPU_NAME}" "${GPUS}"
 
 SEQ_LEN="${SEQ_LEN:-2048}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-32}"
-MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-4}"
+MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 MAX_STEPS="${MAX_STEPS:-10000}"
 SAVE_EVERY="${SAVE_EVERY:-25}"
 EVAL_EVERY="${EVAL_EVERY:-500}"
 KEEP_MILESTONES="${KEEP_MILESTONES:-4}"
 LOG_EVERY="${LOG_EVERY:-1}"
 DTYPE="${DTYPE:-bf16}"
+SIMAMBA_CHUNK_SIZE="${SIMAMBA_CHUNK_SIZE:-64}"
+if [[ -n "${SIMAMBA_RECOMPUTE_CHUNK_SIZE:-}" ]]; then
+  SIMAMBA_RECOMPUTE_CHUNK_SIZE="${SIMAMBA_RECOMPUTE_CHUNK_SIZE}"
+elif [[ "${MICRO_BATCH_SIZE}" -eq 1 ]]; then
+  SIMAMBA_RECOMPUTE_CHUNK_SIZE=512
+else
+  SIMAMBA_RECOMPUTE_CHUNK_SIZE="${SIMAMBA_CHUNK_SIZE}"
+fi
 COMPILE="${COMPILE:-0}"
-RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"
-GCS_EXPORT="${GCS_EXPORT:-1}"
+RESUME_CHECKPOINT="${CLI_RESUME_CHECKPOINT:-${RESUME_CHECKPOINT:-}}"
+GCS_EXPORT="${CLI_GCS_EXPORT:-${GCS_EXPORT:-1}}"
 GCS_RUN_PREFIX="${GCS_RUN_PREFIX:-$(basename "${OUTPUT_DIR}")}"
 GCS_EXPORT_POLL_SECS="${GCS_EXPORT_POLL_SECS:-15}"
-GCS_RESTORE_IF_MISSING="${GCS_RESTORE_IF_MISSING:-1}"
-export GPUS EXPECTED_GPU_NAME GCS_EXPORT GCS_RUN_PREFIX GCS_EXPORT_POLL_SECS GCS_RESTORE_IF_MISSING
+GCS_RESTORE_IF_MISSING="${CLI_GCS_RESTORE_IF_MISSING:-${GCS_RESTORE_IF_MISSING:-1}}"
+export GPUS EXPECTED_GPU_NAME GCS_BUCKET GCS_EXPORT GCS_RUN_PREFIX GCS_EXPORT_POLL_SECS GCS_RESTORE_IF_MISSING
+
+if [[ "${MICRO_BATCH_SIZE}" -lt 1 ]]; then
+  echo "MICRO_BATCH_SIZE must be >= 1, got ${MICRO_BATCH_SIZE}." >&2
+  exit 1
+fi
+
+if [[ "${SIMAMBA_CHUNK_SIZE}" -lt 1 || "${SIMAMBA_RECOMPUTE_CHUNK_SIZE}" -lt 1 ]]; then
+  echo "SIMAMBA_CHUNK_SIZE and SIMAMBA_RECOMPUTE_CHUNK_SIZE must both be >= 1." >&2
+  exit 1
+fi
+
+if [[ "${GLOBAL_BATCH_SIZE}" -lt 1 ]]; then
+  echo "GLOBAL_BATCH_SIZE must be >= 1, got ${GLOBAL_BATCH_SIZE}." >&2
+  exit 1
+fi
+
+if (( GLOBAL_BATCH_SIZE % (MICRO_BATCH_SIZE * GPUS) != 0 )); then
+  echo "Invalid batch shape: GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE} must be divisible by MICRO_BATCH_SIZE * GPUS = $(( MICRO_BATCH_SIZE * GPUS ))." >&2
+  exit 1
+fi
+
+GRAD_ACCUM_STEPS=$(( GLOBAL_BATCH_SIZE / (MICRO_BATCH_SIZE * GPUS) ))
+
+if [[ "${SEQ_LEN}" -ge 2048 && "${MICRO_BATCH_SIZE}" -gt 1 ]]; then
+  echo "Warning: Simamba backward stores large per-token state histories; SEQ_LEN=${SEQ_LEN} with MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE} is likely to OOM on 48 GiB A6000 GPUs." >&2
+  echo "Warning: The launcher default MICRO_BATCH_SIZE=1 is intentional; raise it only after validating memory on your target allocation." >&2
+fi
 
 if [[ -z "${RESUME_CHECKPOINT}" ]]; then
   if [[ -f "${OUTPUT_DIR}/latest/trainer.pt" ]]; then
     RESUME_CHECKPOINT="${OUTPUT_DIR}/latest/trainer.pt"
   elif [[ "${GCS_RESTORE_IF_MISSING}" == "1" && "${GCS_EXPORT}" == "1" ]]; then
     log_phase "Local latest checkpoint missing; attempting synchronous restore from GCS."
-    RESTORE_JSON="$("${PYTHON_BIN}" scripts/fetch_latest_checkpoint_from_gcs.py --output-dir "${OUTPUT_DIR}")"
+    RESTORE_JSON="$("${PYTHON_BIN}" scripts/fetch_latest_checkpoint_from_gcs.py --bucket "${GCS_BUCKET}" --output-dir "${OUTPUT_DIR}")"
     echo "${RESTORE_JSON}"
     RESTORE_STATUS="$("${PYTHON_BIN}" -c 'import json,sys; print(json.loads(sys.argv[1])["status"])' "${RESTORE_JSON}")"
     if [[ "${RESTORE_STATUS}" == "restored" ]]; then
@@ -237,8 +417,6 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-${THREADS_PER_RANK}}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-${OMP_NUM_THREADS}}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-${OMP_NUM_THREADS}}"
 
-export WANDB_ENTITY="${WANDB_ENTITY:-ssb2234-columbia}"
-export WANDB_PROJECT="${WANDB_PROJECT:-simamba}"
 WANDB_ROOT="${WANDB_ROOT:-${OUTPUT_DIR}/.wandb}"
 export WANDB_DIR="${WANDB_DIR:-${WANDB_ROOT}}"
 export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-${WANDB_ROOT}/cache}"
@@ -246,8 +424,8 @@ export WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR:-${WANDB_ROOT}/config}"
 export WANDB_CONSOLE="${WANDB_CONSOLE:-auto}"
 mkdir -p "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}"
 
-WANDB_NAME="${WANDB_NAME:-simamba_130m_$(date +%Y%m%d_%H%M%S)}"
-WANDB_GROUP="${WANDB_GROUP:-simamba_130m}"
+WANDB_NAME="${CLI_WANDB_NAME:-${WANDB_NAME:-simamba_130m_$(date +%Y%m%d_%H%M%S)}}"
+WANDB_GROUP="${CLI_WANDB_GROUP:-${WANDB_GROUP:-simamba_130m}}"
 
 if [[ "${GCS_EXPORT}" == "1" ]]; then
   if [[ -z "${GCS_BUCKET:-}" ]]; then
@@ -272,6 +450,8 @@ ARGS=(
   --keep-milestones "${KEEP_MILESTONES}"
   --dtype "${DTYPE}"
   --simamba-backend triton
+  --simamba-chunk-size "${SIMAMBA_CHUNK_SIZE}"
+  --simamba-recompute-chunk-size "${SIMAMBA_RECOMPUTE_CHUNK_SIZE}"
   --wandb
   --wandb-project "${WANDB_PROJECT}"
   --wandb-entity "${WANDB_ENTITY}"
@@ -279,6 +459,14 @@ ARGS=(
   --wandb-group "${WANDB_GROUP}"
   --wandb-console "${WANDB_CONSOLE}"
 )
+
+if [[ -n "${CLI_WANDB_ID}" ]]; then
+  ARGS+=(--wandb-id "${CLI_WANDB_ID}")
+fi
+
+if [[ -n "${CLI_WANDB_RESUME}" ]]; then
+  ARGS+=(--wandb-resume "${CLI_WANDB_RESUME}")
+fi
 
 if [[ -n "${VAL_DATA}" ]]; then
   ARGS+=(--val-data "${VAL_DATA}")
@@ -301,6 +489,9 @@ echo "  expected_gpu=${EXPECTED_GPU_NAME}"
 echo "  seq_len=${SEQ_LEN}"
 echo "  global_batch_size=${GLOBAL_BATCH_SIZE}"
 echo "  micro_batch_size=${MICRO_BATCH_SIZE}"
+echo "  grad_accum_steps=${GRAD_ACCUM_STEPS}"
+echo "  simamba_chunk_size=${SIMAMBA_CHUNK_SIZE}"
+echo "  simamba_recompute_chunk_size=${SIMAMBA_RECOMPUTE_CHUNK_SIZE}"
 echo "  max_steps=${MAX_STEPS}"
 echo "  log_every=${LOG_EVERY}"
 echo "  save_every=${SAVE_EVERY}"
@@ -316,6 +507,10 @@ if [[ "${GCS_EXPORT}" == "1" ]]; then
   echo "  gcs_bucket=${GCS_BUCKET}"
   echo "  gcs_prefix=${GCS_PREFIX:-<none>}"
   echo "  gcs_run_prefix=${GCS_RUN_PREFIX}"
+fi
+
+if [[ "${SIMAMBA_RECOMPUTE_CHUNK_SIZE}" -lt "${SEQ_LEN}" ]]; then
+  echo "Note: SIMAMBA_RECOMPUTE_CHUNK_SIZE=${SIMAMBA_RECOMPUTE_CHUNK_SIZE} is below SEQ_LEN=${SEQ_LEN}; this mainly matters only if a fallback/stateful Simamba path is used." >&2
 fi
 
 log_phase "Python environment preflight begin"
@@ -372,17 +567,33 @@ if [[ "${GCS_EXPORT}" == "1" ]]; then
   log_phase "Checkpoint export helper running pid=${EXPORT_PID}"
 fi
 
+TRAIN_PID=""
+forward_training_stop() {
+  local reason="$1"
+  if [[ -n "${TRAIN_PID}" ]]; then
+    log_phase "Launcher received ${reason}; forwarding SIGTERM to training pid=${TRAIN_PID}"
+    kill -TERM "${TRAIN_PID}" 2>/dev/null || true
+  fi
+}
+
+trap 'forward_training_stop HUP' HUP
+trap 'forward_training_stop INT' INT
+trap 'forward_training_stop TERM' TERM
+
 set +e
 if [[ "${GPUS}" == "1" ]]; then
   log_phase "Training process start mode=single_gpu"
-  "${PYTHON_BIN}" scripts/train_simamba_lm.py "${ARGS[@]}"
-  TRAIN_RC=$?
+  "${PYTHON_BIN}" scripts/train_simamba_lm.py "${ARGS[@]}" &
 else
   log_phase "Training process start mode=ddp nproc_per_node=${GPUS}"
-  "${PYTHON_BIN}" -m torch.distributed.run --standalone --nproc_per_node="${GPUS}" scripts/train_simamba_lm.py "${ARGS[@]}"
-  TRAIN_RC=$?
+  "${PYTHON_BIN}" -m torch.distributed.run --standalone --nproc_per_node="${GPUS}" scripts/train_simamba_lm.py "${ARGS[@]}" &
 fi
+TRAIN_PID=$!
+wait "${TRAIN_PID}"
+TRAIN_RC=$?
+TRAIN_PID=""
 set -e
+trap - HUP INT TERM
 log_phase "Training process end rc=${TRAIN_RC}"
 
 EXPORT_RC=0

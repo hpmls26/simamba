@@ -385,7 +385,8 @@ The long-running launcher is:
 scripts/run_train_simamba_130m.sh
 ```
 
-It now defaults to the same `burst` 4-GPU shape used by the working smoke run, validates that the visible GPUs match `A6000`, writes W&B scratch files under the training output directory instead of the repo root, and saves model-only milestone checkpoints every 25 steps for asynchronous export.
+It now validates that the visible GPUs match `A6000`, writes W&B scratch files under the training output directory instead of the repo root, and saves model-only milestone checkpoints every 25 steps for asynchronous export.
+At `SEQ_LEN=2048`, it defaults to `MICRO_BATCH_SIZE=1` and keeps `GLOBAL_BATCH_SIZE=32` via gradient accumulation because the current Simamba backward path is activation-heavy and can OOM with a local microbatch of 4 on 48 GiB A6000 GPUs.
 
 Before submitting, make sure these variables are available in the batch environment:
 
@@ -401,6 +402,12 @@ Then submit:
 
 ```bash
 sbatch --export=ALL scripts/run_train_simamba_130m.sh /path/train.bin /path/val.bin /path/output_dir
+```
+
+If you want to override the default batch shape, do it explicitly in the submit environment. For example:
+
+```bash
+MICRO_BATCH_SIZE=1 GLOBAL_BATCH_SIZE=32 sbatch --export=ALL scripts/run_train_simamba_130m.sh /path/train.bin /path/val.bin /path/output_dir
 ```
 
 Notes:

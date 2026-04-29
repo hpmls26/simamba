@@ -43,6 +43,7 @@ class Simamba(nn.Module):
         is_mimo=False,
         mimo_rank=4,
         chunk_size=64,
+        recompute_chunk_size=None,
         use_midpoint_control=False,
         simamba_backend=SIMAMBA_BACKEND_REFERENCE,
         simpson_boundary_mode=SIMAMBA_BOUNDARY_MODE_ZERO_PAD,
@@ -66,6 +67,7 @@ class Simamba(nn.Module):
         self.expand = expand
         self.headdim = headdim
         self.chunk_size = chunk_size
+        self.recompute_chunk_size = recompute_chunk_size if recompute_chunk_size is not None else chunk_size
         self.layer_idx = layer_idx
         self.A_floor = A_floor
         self.is_outproj_norm = is_outproj_norm
@@ -279,6 +281,7 @@ class Simamba(nn.Module):
                 D=self.D,
                 Z=z if not self.is_outproj_norm else None,
                 chunk_size=self.chunk_size,
+                recompute_chunk_size=self.recompute_chunk_size,
                 Initial_States=input_states,
                 return_final_states=input_states is not None,
                 cu_seqlens=cu_seqlens,
