@@ -13,6 +13,43 @@
 
 set -euo pipefail
 
+# Slurm batch shells are not guaranteed to source the user's interactive shell
+# startup files. Load ~/.bashrc explicitly so CUDA-related env stays consistent
+# with manual launches. The cluster's /etc/bashrc and profile.d fragments are
+# not strict-mode-safe, so temporarily relax strict shell options while sourcing.
+if [[ -f "${HOME}/.bashrc" ]]; then
+  had_errexit=0
+  had_nounset=0
+  had_pipefail=0
+  case $- in
+    *e*)
+      had_errexit=1
+      set +e
+      ;;
+  esac
+  case $- in
+    *u*)
+      had_nounset=1
+      set +u
+      ;;
+  esac
+  if set -o | grep -q '^pipefail[[:space:]]*on$'; then
+    had_pipefail=1
+    set +o pipefail
+  fi
+  # shellcheck disable=SC1090
+  . "${HOME}/.bashrc"
+  if (( had_pipefail )); then
+    set -o pipefail
+  fi
+  if (( had_errexit )); then
+    set -e
+  fi
+  if (( had_nounset )); then
+    set -u
+  fi
+fi
+
 resolve_repo_root() {
   local script_dir candidate job_command script_path
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -110,6 +147,17 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 #   MICRO_BATCH_SIZE=1
 #   SIMAMBA_CHUNK_SIZE=64
 #   SIMAMBA_RECOMPUTE_CHUNK_SIZE=512  # Defaulted automatically for MICRO_BATCH_SIZE=1
+#   LR=2e-5
+#   MIN_LR=1e-5
+#   WARMUP_STEPS=2000
+#   WEIGHT_DECAY=0.1
+#   BETA1=0.9
+#   BETA2=0.98
+#   GRAD_CLIP=1.0
+#   SIMAMBA_DT_LIMIT_MIN=0.001
+#   SIMAMBA_DT_LIMIT_MAX=0.1
+#   SIMAMBA_A_MAX=16.0
+#   SIMAMBA_OUTPROJ_NORM=1
 #   MAX_STEPS=10000
 #   SAVE_EVERY=25
 #   EVAL_EVERY=500
@@ -342,12 +390,23 @@ SEQ_LEN="${SEQ_LEN:-2048}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-32}"
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 MAX_STEPS="${MAX_STEPS:-10000}"
+LR="${LR:-2e-5}"
+MIN_LR="${MIN_LR:-1e-5}"
+WARMUP_STEPS="${WARMUP_STEPS:-2000}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-0.1}"
+BETA1="${BETA1:-0.9}"
+BETA2="${BETA2:-0.98}"
+GRAD_CLIP="${GRAD_CLIP:-1.0}"
 SAVE_EVERY="${SAVE_EVERY:-25}"
 EVAL_EVERY="${EVAL_EVERY:-500}"
 KEEP_MILESTONES="${KEEP_MILESTONES:-4}"
 LOG_EVERY="${LOG_EVERY:-1}"
 DTYPE="${DTYPE:-bf16}"
 SIMAMBA_CHUNK_SIZE="${SIMAMBA_CHUNK_SIZE:-64}"
+SIMAMBA_DT_LIMIT_MIN="${SIMAMBA_DT_LIMIT_MIN:-0.001}"
+SIMAMBA_DT_LIMIT_MAX="${SIMAMBA_DT_LIMIT_MAX:-0.1}"
+SIMAMBA_A_MAX="${SIMAMBA_A_MAX:-16.0}"
+SIMAMBA_OUTPROJ_NORM="${SIMAMBA_OUTPROJ_NORM:-1}"
 if [[ -n "${SIMAMBA_RECOMPUTE_CHUNK_SIZE:-}" ]]; then
   SIMAMBA_RECOMPUTE_CHUNK_SIZE="${SIMAMBA_RECOMPUTE_CHUNK_SIZE}"
 elif [[ "${MICRO_BATCH_SIZE}" -eq 1 ]]; then
@@ -370,6 +429,11 @@ fi
 
 if [[ "${SIMAMBA_CHUNK_SIZE}" -lt 1 || "${SIMAMBA_RECOMPUTE_CHUNK_SIZE}" -lt 1 ]]; then
   echo "SIMAMBA_CHUNK_SIZE and SIMAMBA_RECOMPUTE_CHUNK_SIZE must both be >= 1." >&2
+  exit 1
+fi
+
+if [[ "${SIMAMBA_OUTPROJ_NORM}" != "0" && "${SIMAMBA_OUTPROJ_NORM}" != "1" ]]; then
+  echo "SIMAMBA_OUTPROJ_NORM must be 0 or 1, got ${SIMAMBA_OUTPROJ_NORM}." >&2
   exit 1
 fi
 
@@ -444,6 +508,12 @@ ARGS=(
   --global-batch-size "${GLOBAL_BATCH_SIZE}"
   --micro-batch-size "${MICRO_BATCH_SIZE}"
   --max-steps "${MAX_STEPS}"
+  --lr "${LR}"
+  --min-lr "${MIN_LR}"
+  --weight-decay "${WEIGHT_DECAY}"
+  --betas "${BETA1}" "${BETA2}"
+  --grad-clip "${GRAD_CLIP}"
+  --warmup-steps "${WARMUP_STEPS}"
   --log-every "${LOG_EVERY}"
   --save-every "${SAVE_EVERY}"
   --eval-every "${EVAL_EVERY}"
@@ -452,6 +522,8 @@ ARGS=(
   --simamba-backend triton
   --simamba-chunk-size "${SIMAMBA_CHUNK_SIZE}"
   --simamba-recompute-chunk-size "${SIMAMBA_RECOMPUTE_CHUNK_SIZE}"
+  --simamba-dt-limit "${SIMAMBA_DT_LIMIT_MIN}" "${SIMAMBA_DT_LIMIT_MAX}"
+  --simamba-a-max "${SIMAMBA_A_MAX}"
   --wandb
   --wandb-project "${WANDB_PROJECT}"
   --wandb-entity "${WANDB_ENTITY}"
@@ -459,6 +531,10 @@ ARGS=(
   --wandb-group "${WANDB_GROUP}"
   --wandb-console "${WANDB_CONSOLE}"
 )
+
+if [[ "${SIMAMBA_OUTPROJ_NORM}" == "1" ]]; then
+  ARGS+=(--simamba-outproj-norm)
+fi
 
 if [[ -n "${CLI_WANDB_ID}" ]]; then
   ARGS+=(--wandb-id "${CLI_WANDB_ID}")
@@ -492,7 +568,16 @@ echo "  micro_batch_size=${MICRO_BATCH_SIZE}"
 echo "  grad_accum_steps=${GRAD_ACCUM_STEPS}"
 echo "  simamba_chunk_size=${SIMAMBA_CHUNK_SIZE}"
 echo "  simamba_recompute_chunk_size=${SIMAMBA_RECOMPUTE_CHUNK_SIZE}"
+echo "  simamba_dt_limit=(${SIMAMBA_DT_LIMIT_MIN}, ${SIMAMBA_DT_LIMIT_MAX})"
+echo "  simamba_a_max=${SIMAMBA_A_MAX}"
+echo "  simamba_outproj_norm=${SIMAMBA_OUTPROJ_NORM}"
 echo "  max_steps=${MAX_STEPS}"
+echo "  lr=${LR}"
+echo "  min_lr=${MIN_LR}"
+echo "  warmup_steps=${WARMUP_STEPS}"
+echo "  weight_decay=${WEIGHT_DECAY}"
+echo "  betas=(${BETA1}, ${BETA2})"
+echo "  grad_clip=${GRAD_CLIP}"
 echo "  log_every=${LOG_EVERY}"
 echo "  save_every=${SAVE_EVERY}"
 echo "  keep_milestones=${KEEP_MILESTONES}"

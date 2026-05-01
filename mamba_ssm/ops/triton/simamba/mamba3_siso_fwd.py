@@ -716,6 +716,8 @@ def mamba3_siso_fwd(
     cu_seqlens: Optional[torch.Tensor] = None,
 ):
     batch, seqlen, nheads_qk, headdim_qk = Q.shape
+    if cu_seqlens is not None:
+        raise NotImplementedError("Simamba Triton forward does not support cu_seqlens / variable-length mode.")
     if K.shape != Q.shape:
         raise ValueError(f"Q and K shape mismatch: {Q.shape} vs {K.shape}.")
     _, _, nheads, headdim_v = V.shape
@@ -743,14 +745,9 @@ def mamba3_siso_fwd(
     if Angles.shape != (batch, seqlen, nheads, n_angles):
         raise ValueError(f"Angles shape mismatch: expected {(batch, seqlen, nheads, n_angles)}, got {Angles.shape}.")
 
-    is_varlen = cu_seqlens is not None
-    if is_varlen and batch != 1:
-        raise ValueError(f"Varlen mode requires batch=1, got batch={batch}.")
-
     # The chunk-parallel kernel uses tl.dot over the qk axis, which on current
-    # Triton requires K >= 16. Tiny test shapes and varlen mode fall back to
-    # the step loop.
-    if is_varlen or headdim_qk < 16:
+    # Triton requires K >= 16. Tiny test shapes fall back to the step loop.
+    if headdim_qk < 16:
         out, final_states = _mamba3_siso_fwd_loop(
             Q=Q,
             K=K,
@@ -1002,7 +999,7 @@ def mamba3_siso_fwd(
     return (
         out,
         out_pregate,
-        angles_cumsum if not is_varlen and headdim_qk >= 16 else None,
+        angles_cumsum if headdim_qk >= 16 else None,
         chunk_ssm_starts,
         chunk_k_prev1_starts,
         chunk_k_prev2_starts,

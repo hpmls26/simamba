@@ -688,6 +688,37 @@ def test_simamba_module_triton_backward_uses_core_parameters():
     assert model.C_norm.weight.grad is not None
 
 
+def test_simamba_step_rejects_grouped_heads():
+    model = Simamba(
+        d_model=64,
+        d_state=16,
+        expand=2,
+        headdim=16,
+        ngroups=2,
+        simamba_backend="reference",
+        device="cpu",
+        dtype=torch.float32,
+    )
+    batch = 1
+    u = torch.randn(batch, model.d_model, dtype=torch.float32)
+    angle_state = torch.zeros(batch, model.nheads, model.num_rope_angles, dtype=torch.float32)
+    ssm_state = torch.zeros(batch, model.nheads, model.headdim, model.d_state, dtype=torch.float32)
+    k_prev1_state = torch.zeros(batch, model.nheads, model.d_state, dtype=torch.float32)
+    k_prev2_state = torch.zeros(batch, model.nheads, model.d_state, dtype=torch.float32)
+    v_prev1_state = torch.zeros(batch, model.nheads, model.headdim, dtype=torch.float32)
+    v_prev2_state = torch.zeros(batch, model.nheads, model.headdim, dtype=torch.float32)
+    with pytest.raises(NotImplementedError, match="incremental decode currently supports ngroups=1 only"):
+        model.step(
+            u,
+            angle_state,
+            ssm_state,
+            k_prev1_state,
+            k_prev2_state,
+            v_prev1_state,
+            v_prev2_state,
+        )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_simamba_triton_combined_matches_reference_autograd_with_midpoint_and_states():
     torch.manual_seed(14)

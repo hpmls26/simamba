@@ -42,6 +42,51 @@ def count_parameters(model) -> int:
     return sum(parameter.numel() for parameter in model.parameters())
 
 
+def build_optimizer(model, args):
+    decay_params = []
+    no_decay_params = []
+    decay_tensors = 0
+    no_decay_tensors = 0
+    decay_elements = 0
+    no_decay_elements = 0
+
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        use_no_decay = (
+            getattr(parameter, "_no_weight_decay", False)
+            or parameter.ndim <= 1
+            or name.endswith("bias")
+        )
+        if use_no_decay:
+            no_decay_params.append(parameter)
+            no_decay_tensors += 1
+            no_decay_elements += parameter.numel()
+        else:
+            decay_params.append(parameter)
+            decay_tensors += 1
+            decay_elements += parameter.numel()
+
+    param_groups = []
+    if decay_params:
+        param_groups.append({"params": decay_params, "weight_decay": args.weight_decay})
+    if no_decay_params:
+        param_groups.append({"params": no_decay_params, "weight_decay": 0.0})
+
+    optimizer = torch.optim.AdamW(
+        param_groups,
+        lr=args.lr,
+        betas=tuple(args.betas),
+    )
+    stats = {
+        "decay_tensors": decay_tensors,
+        "no_decay_tensors": no_decay_tensors,
+        "decay_elements": decay_elements,
+        "no_decay_elements": no_decay_elements,
+    }
+    return optimizer, stats
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Minimal Mamba-family LM pretraining script.")
     parser.add_argument("--train-data", type=Path, required=True, help="Tokenized train .bin file.")
@@ -70,6 +115,8 @@ def parse_args():
     parser.add_argument("--simamba-rope-fraction", type=float, default=0.5)
     parser.add_argument("--simamba-chunk-size", type=int, default=64)
     parser.add_argument("--simamba-recompute-chunk-size", type=int, default=None)
+    parser.add_argument("--simamba-dt-limit", type=float, nargs=2, default=(1e-3, 0.1))
+    parser.add_argument("--simamba-a-max", type=float, default=16.0)
     parser.add_argument("--simamba-use-midpoint-control", action="store_true")
     parser.add_argument("--simamba-backend", choices=["reference", "triton"], default="triton")
     parser.add_argument("--simamba-outproj-norm", action="store_true")
@@ -95,12 +142,12 @@ def parse_args():
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--micro-batch-size", type=int, default=8)
     parser.add_argument("--max-steps", type=int, default=10000)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--min-lr", type=float, default=3e-5)
+    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--min-lr", type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=0.1)
-    parser.add_argument("--betas", type=float, nargs=2, default=(0.9, 0.95))
+    parser.add_argument("--betas", type=float, nargs=2, default=(0.9, 0.98))
     parser.add_argument("--grad-clip", type=float, default=1.0)
-    parser.add_argument("--warmup-steps", type=int, default=500)
+    parser.add_argument("--warmup-steps", type=int, default=2000)
     parser.add_argument("--log-every", type=int, default=1)
     parser.add_argument("--eval-every", type=int, default=500)
     parser.add_argument("--eval-iters", type=int, default=50)
@@ -191,10 +238,11 @@ def make_config(args):
             "d_state": args.simamba_d_state,
             "expand": args.simamba_expand,
             "headdim": args.simamba_headdim,
-            "ngroups": args.simamba_ngroups,
             "rope_fraction": args.simamba_rope_fraction,
             "chunk_size": args.simamba_chunk_size,
             "recompute_chunk_size": args.simamba_recompute_chunk_size,
+            "dt_limit": tuple(args.simamba_dt_limit),
+            "A_max": args.simamba_a_max,
             "use_midpoint_control": args.simamba_use_midpoint_control,
             "simamba_backend": args.simamba_backend,
             "is_outproj_norm": args.simamba_outproj_norm,
@@ -238,12 +286,28 @@ def make_config(args):
     )
 
 
-def get_dtype(dtype_name: str):
+def get_param_dtype(_dtype_name: str):
+    # Keep master weights in fp32 and rely on autocast for reduced-precision activations.
+    return torch.float32
+
+
+def get_amp_dtype(dtype_name: str):
     return {
         "bf16": torch.bfloat16,
         "fp16": torch.float16,
         "fp32": torch.float32,
     }[dtype_name]
+
+
+def cast_optimizer_state_(optimizer):
+    for param, state in optimizer.state.items():
+        for key, value in state.items():
+            if not torch.is_tensor(value):
+                continue
+            if torch.is_floating_point(value) and key != "step":
+                state[key] = value.to(device=param.device, dtype=param.dtype)
+            else:
+                state[key] = value.to(device=param.device)
 
 
 def lr_for_step(step: int, args):
@@ -479,7 +543,7 @@ def main():
         local_rank=local_rank,
     )
     device = torch.device(f"cuda:{local_rank}" if distributed else args.device)
-    emit_status("runtime.device_ready", rank=rank, device=str(device), dtype=args.dtype)
+    emit_status("runtime.device_ready", rank=rank, device=str(device), dtype=args.dtype, param_dtype=str(get_param_dtype(args.dtype)))
 
     phase_start = time.perf_counter()
     torch.manual_seed(args.seed + rank)
@@ -506,7 +570,7 @@ def main():
     phase_start = time.perf_counter()
     emit_status("model.init.begin", rank=rank, model_layer=args.model_layer)
     config = make_config(args)
-    model = MambaLMHeadModel(config=config, device=device, dtype=get_dtype(args.dtype))
+    model = MambaLMHeadModel(config=config, device=device, dtype=get_param_dtype(args.dtype))
     emit_status(
         "model.init.end",
         rank=rank,
@@ -522,13 +586,17 @@ def main():
 
     phase_start = time.perf_counter()
     emit_status("optimizer.init.begin", rank=rank)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.lr,
-        betas=tuple(args.betas),
+    optimizer, optimizer_stats = build_optimizer(model, args)
+    emit_status(
+        "optimizer.init.end",
+        rank=rank,
+        duration_sec=round(time.perf_counter() - phase_start, 3),
+        decay_tensors=optimizer_stats["decay_tensors"],
+        no_decay_tensors=optimizer_stats["no_decay_tensors"],
+        decay_elements=optimizer_stats["decay_elements"],
+        no_decay_elements=optimizer_stats["no_decay_elements"],
         weight_decay=args.weight_decay,
     )
-    emit_status("optimizer.init.end", rank=rank, duration_sec=round(time.perf_counter() - phase_start, 3))
 
     start_step = 0
     resume_wandb = None
@@ -536,6 +604,7 @@ def main():
         phase_start = time.perf_counter()
         emit_status("checkpoint.resume.begin", rank=rank, path=str(args.resume))
         resume_state = load_checkpoint(args.resume, model, optimizer)
+        cast_optimizer_state_(optimizer)
         start_step = resume_state["resume_step"]
         resume_wandb = resume_state.get("wandb")
         emit_status(
@@ -554,7 +623,7 @@ def main():
         emit_status("ddp.wrap.end", rank=rank, duration_sec=round(time.perf_counter() - phase_start, 3))
 
     scaler = torch.amp.GradScaler("cuda", enabled=(args.dtype == "fp16" and device.type == "cuda"))
-    amp_dtype = get_dtype(args.dtype)
+    amp_dtype = get_amp_dtype(args.dtype)
     amp_ctx = (
         lambda: torch.autocast(device_type=device.type, dtype=amp_dtype)
         if args.dtype != "fp32"
@@ -670,11 +739,46 @@ def main():
                     loss=float(loss.detach().item() * grad_accum_steps),
                 )
 
+        grad_norm_post_clip = torch.zeros((), device=device)
         if args.grad_clip > 0:
             scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         else:
             grad_norm = torch.zeros((), device=device)
+
+        loss_is_finite = bool(torch.isfinite(loss_accum).item())
+        grad_norm_is_finite = bool(torch.isfinite(grad_norm).item())
+        finite_step = torch.tensor(
+            1 if (loss_is_finite and grad_norm_is_finite) else 0,
+            device=device,
+            dtype=torch.int32,
+        )
+        if distributed:
+            dist.all_reduce(finite_step, op=dist.ReduceOp.MIN)
+        if int(finite_step.item()) == 0:
+            optimizer.zero_grad(set_to_none=True)
+            stop_requested = True
+            stop_signal = "NONFINITE"
+            emit_status(
+                "train.nonfinite_detected",
+                rank=rank,
+                step=step,
+                lr=lr,
+                loss_finite=loss_is_finite,
+                grad_norm_finite=grad_norm_is_finite,
+                loss=(float(loss_accum.item()) if loss_is_finite else None),
+                grad_norm=(float(grad_norm.item()) if grad_norm_is_finite else None),
+            )
+            break
+
+        grad_norm_post_clip = (
+            grad_norm.clamp(max=args.grad_clip) if args.grad_clip > 0 else grad_norm
+        )
+        grad_clip_coef = (
+            torch.clamp(args.grad_clip / grad_norm.clamp(min=1e-12), max=1.0)
+            if args.grad_clip > 0
+            else torch.ones((), device=device)
+        )
 
         scaler.step(optimizer)
         scaler.update()
@@ -703,6 +807,9 @@ def main():
                 "train/loss": float(loss_accum.item()),
                 "train/lr": lr,
                 "train/grad_norm": float(grad_norm.item()),
+                "train/grad_norm_pre_clip": float(grad_norm.item()),
+                "train/grad_norm_post_clip": float(grad_norm_post_clip.item()),
+                "train/grad_clip_coef": float(grad_clip_coef.item()),
                 "train/tokens_per_sec": tokens_per_sec,
             }
             print(json.dumps(metrics), flush=True)

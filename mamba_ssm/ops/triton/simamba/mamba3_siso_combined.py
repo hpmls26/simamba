@@ -774,12 +774,12 @@ def mamba3_siso_combined(
 ):
     batch, seqlen, nheads_qk, headdim_qk = Q.shape
     _, _, nheads, _ = V.shape
+    if cu_seqlens is not None:
+        raise NotImplementedError("Simamba Triton combined op does not support cu_seqlens / variable-length mode.")
     if nheads % nheads_qk != 0:
         raise ValueError(f"nheads ({nheads}) must be divisible by nheads_qk ({nheads_qk}).")
     if headdim_qk % 2 != 0:
         raise ValueError(f"headdim_qk ({headdim_qk}) must be even for rotary embeddings.")
-    if cu_seqlens is not None and batch != 1:
-        raise ValueError(f"Batch size must be 1 with cu_seqlens, got batch={batch}.")
 
     (
         Input_Angle_State,
