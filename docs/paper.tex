@@ -156,11 +156,20 @@ The main implementation changes are:
 \begin{itemize}
     \item \texttt{simamba.py}: \modelname mixer, Simpson/trapezoid switch, coefficient offsets, midpoint control, optional local convolution, and inference cache hooks.
     \item \texttt{simamba\_siso\_combined.py}: reference/vectorized Simpson and matched trapezoid SISO updates.
+    \item \texttt{mamba3\_siso\_fwd.py}, \texttt{mamba3\_siso\_bwd.py}, and \texttt{mamba3\_siso\_combined.py}: Triton SISO kernels and the custom PyTorch autograd wrapper for \modelname.
     \item \texttt{train\_simamba\_lm.py}: fixed validation spans, no-replacement epoch sampling, learning-rate decay, nonfinite-step handling, W\&B logging, and checkpoint metadata.
     \item \texttt{prepare\_slimpajama.py}: streaming SlimPajama tokenization into \texttt{uint16} memory maps.
     \item \texttt{eval\_checkpoint\_compression.py}: quantization and pruning perturbation evaluation.
     \item \texttt{generate\_hpml\_paper\_assets.py}: reproducible extraction of local W\&B histories and paper figures.
 \end{itemize}
+
+\subsection{PyTorch and Triton Optimizations}
+
+The main HPML implementation work was turning the Simpson SISO recurrence into a trainable GPU operator rather than leaving it as a Python loop. The PyTorch interface is a custom \texttt{torch.autograd.Function} in \texttt{mamba3\_siso\_combined.py}. Its forward path calls a Triton prefill kernel, saves only the tensors needed for differentiation, and exposes the operator as a normal module call inside \texttt{simamba.py}. This let the rest of the model remain ordinary PyTorch: linear projections, optional causal convolution, RMSNorm, AdamW, gradient accumulation, checkpointing, W\&B logging, and optional \texttt{torch.compile} support are handled by the training script. We also keep master parameters in fp32 and use autocast only as an optional activation optimization, because SSM recurrent dynamics were unstable when parameter precision was reduced.
+
+The forward Triton path in \texttt{mamba3\_siso\_fwd.py} computes the SISO recurrent core one program per batch/head tile. It fuses Q/K bias application, rotary-angle use, the Simpson width-3 state update, the $D$ skip term, and optional $z$ gating into one chunked scan over the sequence. The implementation uses explicit pointer arithmetic and stride arguments rather than newer descriptor-only Triton APIs so it can run on the V100 environment used for the experiments. It also includes autotuned stage/warp choices and a fallback step loop for tiny head dimensions that violate Triton's matrix-tile constraints.
+
+The backward pass was the more important correctness optimization. Reusing the original \mambathree trapezoid backward would silently train the wrong model, so \texttt{mamba3\_siso\_bwd.py} implements Simpson-specific reverse-time state propagation. The fused backward kernel computes gradients for $Q$, $K$, $V$, $A\Delta t$, $\Delta t$, the Simpson control, optional midpoint control, Q/K biases, $D$, and recurrent input states while walking chunks in reverse. For the coefficient path, a small Triton step kernel computes per-token dot products against the current SSM adjoint, previous state, and the two lagged $vk^\top$ terms. The wrapper recomputes chunk-start states under \texttt{torch.no\_grad()} instead of storing every intermediate state, which trades extra arithmetic for lower activation memory. A reference/autograd path remains available for edge cases such as stateful inference gradients, and this separation helped debug the original nonfinite-gradient issue.
 
 \subsection{Hugging Face and vLLM Export}
 
