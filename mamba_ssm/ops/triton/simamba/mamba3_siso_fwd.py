@@ -49,11 +49,17 @@ def mamba3_siso_fwd_kernel(
     Initial_V_prev1_State,
     Initial_V_prev2_State,
     Out,
+    Out_Pregate,
     Final_SSM_State,
     Final_K_prev1_State,
     Final_K_prev2_State,
     Final_V_prev1_State,
     Final_V_prev2_State,
+    Chunk_Start_SSM_State,
+    Chunk_Start_K_prev1_State,
+    Chunk_Start_K_prev2_State,
+    Chunk_Start_V_prev1_State,
+    Chunk_Start_V_prev2_State,
     stride_q_batch,
     stride_q_seqlen,
     stride_q_head,
@@ -111,6 +117,10 @@ def mamba3_siso_fwd_kernel(
     stride_o_seqlen,
     stride_o_head,
     stride_o_vdim,
+    stride_o_pregate_batch,
+    stride_o_pregate_seqlen,
+    stride_o_pregate_head,
+    stride_o_pregate_vdim,
     stride_final_ssm_batch,
     stride_final_ssm_head,
     stride_final_ssm_vdim,
@@ -127,6 +137,27 @@ def mamba3_siso_fwd_kernel(
     stride_final_v_prev2_batch,
     stride_final_v_prev2_head,
     stride_final_v_prev2_dim,
+    stride_chunk_ssm_batch,
+    stride_chunk_ssm_head,
+    stride_chunk_ssm_chunk,
+    stride_chunk_ssm_vdim,
+    stride_chunk_ssm_qkdim,
+    stride_chunk_k_prev1_batch,
+    stride_chunk_k_prev1_head,
+    stride_chunk_k_prev1_chunk,
+    stride_chunk_k_prev1_dim,
+    stride_chunk_k_prev2_batch,
+    stride_chunk_k_prev2_head,
+    stride_chunk_k_prev2_chunk,
+    stride_chunk_k_prev2_dim,
+    stride_chunk_v_prev1_batch,
+    stride_chunk_v_prev1_head,
+    stride_chunk_v_prev1_chunk,
+    stride_chunk_v_prev1_dim,
+    stride_chunk_v_prev2_batch,
+    stride_chunk_v_prev2_head,
+    stride_chunk_v_prev2_chunk,
+    stride_chunk_v_prev2_dim,
     seqlen,
     nheads_qk,
     headdim_angles,
@@ -138,6 +169,7 @@ def mamba3_siso_fwd_kernel(
     HAS_MIDPOINT: tl.constexpr,
     HAS_INITIAL_STATES: tl.constexpr,
     RETURN_FINAL_STATES: tl.constexpr,
+    STORE_CHUNK_BOUNDARY_STATES: tl.constexpr,
 ):
     pid_head = tl.program_id(0)
     pid_batch = tl.program_id(1)
@@ -200,8 +232,52 @@ def mamba3_siso_fwd_kernel(
         v_prev2 = tl.zeros([HEADDIM_V], dtype=tl.float32)
 
     for chunk_start in range(0, seqlen, CHUNK_SIZE):
+        chunk_idx = chunk_start // CHUNK_SIZE
         offs_seq = chunk_start + offs_s
         seq_mask = offs_seq < seqlen
+
+        if STORE_CHUNK_BOUNDARY_STATES:
+            tl.store(
+                Chunk_Start_SSM_State
+                + pid_batch * stride_chunk_ssm_batch
+                + pid_head * stride_chunk_ssm_head
+                + chunk_idx * stride_chunk_ssm_chunk
+                + offs_v[:, None] * stride_chunk_ssm_vdim
+                + offs_qk[None, :] * stride_chunk_ssm_qkdim,
+                acc_ssm,
+            )
+            tl.store(
+                Chunk_Start_K_prev1_State
+                + pid_batch * stride_chunk_k_prev1_batch
+                + pid_head * stride_chunk_k_prev1_head
+                + chunk_idx * stride_chunk_k_prev1_chunk
+                + offs_qk * stride_chunk_k_prev1_dim,
+                k_prev1,
+            )
+            tl.store(
+                Chunk_Start_K_prev2_State
+                + pid_batch * stride_chunk_k_prev2_batch
+                + pid_head * stride_chunk_k_prev2_head
+                + chunk_idx * stride_chunk_k_prev2_chunk
+                + offs_qk * stride_chunk_k_prev2_dim,
+                k_prev2,
+            )
+            tl.store(
+                Chunk_Start_V_prev1_State
+                + pid_batch * stride_chunk_v_prev1_batch
+                + pid_head * stride_chunk_v_prev1_head
+                + chunk_idx * stride_chunk_v_prev1_chunk
+                + offs_v * stride_chunk_v_prev1_dim,
+                v_prev1,
+            )
+            tl.store(
+                Chunk_Start_V_prev2_State
+                + pid_batch * stride_chunk_v_prev2_batch
+                + pid_head * stride_chunk_v_prev2_head
+                + chunk_idx * stride_chunk_v_prev2_chunk
+                + offs_v * stride_chunk_v_prev2_dim,
+                v_prev2,
+            )
 
         q_pre = tl.load(
             Q + pid_batch * stride_q_batch + offs_seq[:, None] * stride_q_seqlen + head_idx_qk * stride_q_head + offs_qk[None, :] * stride_q_qkdim,
@@ -395,6 +471,16 @@ def mamba3_siso_fwd_kernel(
 
         if HAS_D:
             acc_o += D_val * v_block.to(tl.float32)
+        if STORE_CHUNK_BOUNDARY_STATES:
+            tl.store(
+                Out_Pregate
+                + pid_batch * stride_o_pregate_batch
+                + offs_seq[:, None] * stride_o_pregate_seqlen
+                + pid_head * stride_o_pregate_head
+                + offs_v[None, :] * stride_o_pregate_vdim,
+                acc_o,
+                mask=seq_mask[:, None],
+            )
         if HAS_Z:
             acc_o = acc_o * silu(z_block.to(tl.float32))
 
@@ -630,6 +716,8 @@ def mamba3_siso_fwd(
     cu_seqlens: Optional[torch.Tensor] = None,
 ):
     batch, seqlen, nheads_qk, headdim_qk = Q.shape
+    if cu_seqlens is not None:
+        raise NotImplementedError("Simamba Triton forward does not support cu_seqlens / variable-length mode.")
     if K.shape != Q.shape:
         raise ValueError(f"Q and K shape mismatch: {Q.shape} vs {K.shape}.")
     _, _, nheads, headdim_v = V.shape
@@ -657,13 +745,9 @@ def mamba3_siso_fwd(
     if Angles.shape != (batch, seqlen, nheads, n_angles):
         raise ValueError(f"Angles shape mismatch: expected {(batch, seqlen, nheads, n_angles)}, got {Angles.shape}.")
 
-    is_varlen = cu_seqlens is not None
-    if is_varlen and batch != 1:
-        raise ValueError(f"Varlen mode requires batch=1, got batch={batch}.")
-
     # The chunk-parallel kernel uses tl.dot over the qk axis, which on current
     # Triton requires K >= 16. Tiny test shapes fall back to the step loop.
-    if store_states_adt_outv or is_varlen or headdim_qk < 16:
+    if headdim_qk < 16:
         out, final_states = _mamba3_siso_fwd_loop(
             Q=Q,
             K=K,
@@ -681,8 +765,16 @@ def mamba3_siso_fwd(
             return_final_states=return_final_states,
             cu_seqlens=cu_seqlens,
         )
+        out_pregate = None
+        angles_cumsum = None
+        chunk_ssm_starts = None
+        chunk_k_prev1_starts = None
+        chunk_k_prev2_starts = None
+        chunk_v_prev1_starts = None
+        chunk_v_prev2_starts = None
     else:
         state_batch = batch
+        nchunks = triton.cdiv(seqlen, chunk_size)
         if Initial_States is None:
             init_angle_state = None
             init_ssm_state = torch.zeros((state_batch, nheads, headdim_v, headdim_qk), device=Q.device, dtype=torch.float32)
@@ -710,7 +802,9 @@ def mamba3_siso_fwd(
         )
 
         out = torch.empty((batch, seqlen, nheads, headdim_v), device=V.device, dtype=V.dtype)
-        if return_final_states:
+        out_pregate = torch.empty_like(out) if store_states_adt_outv else None
+        needs_final_state_buffers = return_final_states or store_states_adt_outv
+        if needs_final_state_buffers:
             final_ssm_state = torch.empty_like(init_ssm_state)
             final_k_prev1_state = torch.empty_like(init_k_prev1_state)
             final_k_prev2_state = torch.empty_like(init_k_prev2_state)
@@ -722,6 +816,31 @@ def mamba3_siso_fwd(
             final_k_prev2_state = torch.empty((1,), device=Q.device, dtype=Q.dtype)
             final_v_prev1_state = torch.empty((1,), device=Q.device, dtype=V.dtype)
             final_v_prev2_state = torch.empty((1,), device=Q.device, dtype=V.dtype)
+
+        if store_states_adt_outv:
+            chunk_ssm_starts = torch.empty(
+                (batch, nheads, nchunks, headdim_v, headdim_qk),
+                device=Q.device,
+                dtype=torch.bfloat16,
+            )
+            chunk_k_prev1_starts = torch.empty(
+                (batch, nheads, nchunks, headdim_qk),
+                device=Q.device,
+                dtype=Q.dtype,
+            )
+            chunk_k_prev2_starts = torch.empty_like(chunk_k_prev1_starts)
+            chunk_v_prev1_starts = torch.empty(
+                (batch, nheads, nchunks, headdim_v),
+                device=Q.device,
+                dtype=V.dtype,
+            )
+            chunk_v_prev2_starts = torch.empty_like(chunk_v_prev1_starts)
+        else:
+            chunk_ssm_starts = None
+            chunk_k_prev1_starts = None
+            chunk_k_prev2_starts = None
+            chunk_v_prev1_starts = None
+            chunk_v_prev2_starts = None
 
         midpoint_ptr = Midpoint if Midpoint is not None else Simpson
         grid = (nheads, batch)
@@ -744,11 +863,17 @@ def mamba3_siso_fwd(
             init_v_prev1_state,
             init_v_prev2_state,
             out,
+            out_pregate if out_pregate is not None else out,
             final_ssm_state,
             final_k_prev1_state,
             final_k_prev2_state,
             final_v_prev1_state,
             final_v_prev2_state,
+            chunk_ssm_starts if chunk_ssm_starts is not None else final_ssm_state,
+            chunk_k_prev1_starts if chunk_k_prev1_starts is not None else final_k_prev1_state,
+            chunk_k_prev2_starts if chunk_k_prev2_starts is not None else final_k_prev2_state,
+            chunk_v_prev1_starts if chunk_v_prev1_starts is not None else final_v_prev1_state,
+            chunk_v_prev2_starts if chunk_v_prev2_starts is not None else final_v_prev2_state,
             Q.stride(0),
             Q.stride(1),
             Q.stride(2),
@@ -806,22 +931,47 @@ def mamba3_siso_fwd(
             out.stride(1),
             out.stride(2),
             out.stride(3),
-            final_ssm_state.stride(0) if return_final_states else 0,
-            final_ssm_state.stride(1) if return_final_states else 0,
-            final_ssm_state.stride(2) if return_final_states else 0,
-            final_ssm_state.stride(3) if return_final_states else 0,
-            final_k_prev1_state.stride(0) if return_final_states else 0,
-            final_k_prev1_state.stride(1) if return_final_states else 0,
-            final_k_prev1_state.stride(2) if return_final_states else 0,
-            final_k_prev2_state.stride(0) if return_final_states else 0,
-            final_k_prev2_state.stride(1) if return_final_states else 0,
-            final_k_prev2_state.stride(2) if return_final_states else 0,
-            final_v_prev1_state.stride(0) if return_final_states else 0,
-            final_v_prev1_state.stride(1) if return_final_states else 0,
-            final_v_prev1_state.stride(2) if return_final_states else 0,
-            final_v_prev2_state.stride(0) if return_final_states else 0,
-            final_v_prev2_state.stride(1) if return_final_states else 0,
-            final_v_prev2_state.stride(2) if return_final_states else 0,
+            out_pregate.stride(0) if out_pregate is not None else 0,
+            out_pregate.stride(1) if out_pregate is not None else 0,
+            out_pregate.stride(2) if out_pregate is not None else 0,
+            out_pregate.stride(3) if out_pregate is not None else 0,
+            final_ssm_state.stride(0) if needs_final_state_buffers else 0,
+            final_ssm_state.stride(1) if needs_final_state_buffers else 0,
+            final_ssm_state.stride(2) if needs_final_state_buffers else 0,
+            final_ssm_state.stride(3) if needs_final_state_buffers else 0,
+            final_k_prev1_state.stride(0) if needs_final_state_buffers else 0,
+            final_k_prev1_state.stride(1) if needs_final_state_buffers else 0,
+            final_k_prev1_state.stride(2) if needs_final_state_buffers else 0,
+            final_k_prev2_state.stride(0) if needs_final_state_buffers else 0,
+            final_k_prev2_state.stride(1) if needs_final_state_buffers else 0,
+            final_k_prev2_state.stride(2) if needs_final_state_buffers else 0,
+            final_v_prev1_state.stride(0) if needs_final_state_buffers else 0,
+            final_v_prev1_state.stride(1) if needs_final_state_buffers else 0,
+            final_v_prev1_state.stride(2) if needs_final_state_buffers else 0,
+            final_v_prev2_state.stride(0) if needs_final_state_buffers else 0,
+            final_v_prev2_state.stride(1) if needs_final_state_buffers else 0,
+            final_v_prev2_state.stride(2) if needs_final_state_buffers else 0,
+            chunk_ssm_starts.stride(0) if chunk_ssm_starts is not None else 0,
+            chunk_ssm_starts.stride(1) if chunk_ssm_starts is not None else 0,
+            chunk_ssm_starts.stride(2) if chunk_ssm_starts is not None else 0,
+            chunk_ssm_starts.stride(3) if chunk_ssm_starts is not None else 0,
+            chunk_ssm_starts.stride(4) if chunk_ssm_starts is not None else 0,
+            chunk_k_prev1_starts.stride(0) if chunk_k_prev1_starts is not None else 0,
+            chunk_k_prev1_starts.stride(1) if chunk_k_prev1_starts is not None else 0,
+            chunk_k_prev1_starts.stride(2) if chunk_k_prev1_starts is not None else 0,
+            chunk_k_prev1_starts.stride(3) if chunk_k_prev1_starts is not None else 0,
+            chunk_k_prev2_starts.stride(0) if chunk_k_prev2_starts is not None else 0,
+            chunk_k_prev2_starts.stride(1) if chunk_k_prev2_starts is not None else 0,
+            chunk_k_prev2_starts.stride(2) if chunk_k_prev2_starts is not None else 0,
+            chunk_k_prev2_starts.stride(3) if chunk_k_prev2_starts is not None else 0,
+            chunk_v_prev1_starts.stride(0) if chunk_v_prev1_starts is not None else 0,
+            chunk_v_prev1_starts.stride(1) if chunk_v_prev1_starts is not None else 0,
+            chunk_v_prev1_starts.stride(2) if chunk_v_prev1_starts is not None else 0,
+            chunk_v_prev1_starts.stride(3) if chunk_v_prev1_starts is not None else 0,
+            chunk_v_prev2_starts.stride(0) if chunk_v_prev2_starts is not None else 0,
+            chunk_v_prev2_starts.stride(1) if chunk_v_prev2_starts is not None else 0,
+            chunk_v_prev2_starts.stride(2) if chunk_v_prev2_starts is not None else 0,
+            chunk_v_prev2_starts.stride(3) if chunk_v_prev2_starts is not None else 0,
             seqlen,
             nheads_qk,
             n_angles,
@@ -832,10 +982,11 @@ def mamba3_siso_fwd(
             HAS_Z=Z is not None,
             HAS_MIDPOINT=Midpoint is not None,
             HAS_INITIAL_STATES=Initial_States is not None,
-            RETURN_FINAL_STATES=return_final_states,
+            RETURN_FINAL_STATES=needs_final_state_buffers,
+            STORE_CHUNK_BOUNDARY_STATES=store_states_adt_outv,
         )
         final_states = None
-        if return_final_states:
+        if needs_final_state_buffers:
             final_states = (
                 final_angle_state,
                 final_ssm_state,
@@ -847,14 +998,12 @@ def mamba3_siso_fwd(
 
     return (
         out,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        out_pregate,
+        angles_cumsum if headdim_qk >= 16 else None,
+        chunk_ssm_starts,
+        chunk_k_prev1_starts,
+        chunk_k_prev2_starts,
+        chunk_v_prev1_starts,
+        chunk_v_prev2_starts,
         final_states,
     )

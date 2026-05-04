@@ -38,11 +38,14 @@ class Simamba(nn.Module):
         dt_min=0.001,
         dt_max=0.1,
         dt_init_floor=1e-4,
+        dt_limit=(0.001, 0.1),
         A_floor=1e-4,
+        A_max=16.0,
         is_outproj_norm=False,
         is_mimo=False,
         mimo_rank=4,
         chunk_size=64,
+        recompute_chunk_size=None,
         use_midpoint_control=False,
         simamba_backend=SIMAMBA_BACKEND_REFERENCE,
         simpson_boundary_mode=SIMAMBA_BOUNDARY_MODE_ZERO_PAD,
@@ -66,12 +69,28 @@ class Simamba(nn.Module):
         self.expand = expand
         self.headdim = headdim
         self.chunk_size = chunk_size
+        self.recompute_chunk_size = recompute_chunk_size if recompute_chunk_size is not None else chunk_size
         self.layer_idx = layer_idx
         self.A_floor = A_floor
+        self.A_max = float(A_max)
         self.is_outproj_norm = is_outproj_norm
         self.is_mimo = False
         self.mimo_rank = 1
         self.use_midpoint_control = use_midpoint_control
+        if len(dt_limit) != 2:
+            raise ValueError(f"dt_limit must be a (min, max) pair, got {dt_limit!r}.")
+        dt_limit_min, dt_limit_max = float(dt_limit[0]), float(dt_limit[1])
+        if dt_limit_min < 0.0 or dt_limit_max < dt_limit_min:
+            raise ValueError(
+                f"Invalid dt_limit={dt_limit!r}; expected 0 <= min <= max."
+            )
+        self.dt_limit = (dt_limit_min, dt_limit_max)
+        if self.A_max <= 0.0:
+            raise ValueError(f"A_max must be positive, got {A_max!r}.")
+        if math.isfinite(self.A_max) and self.A_max < self.A_floor:
+            raise ValueError(
+                f"A_max={self.A_max} must be >= A_floor={self.A_floor}."
+            )
         if simamba_backend not in SIMAMBA_SUPPORTED_BACKENDS:
             raise ValueError(
                 f"Unsupported simamba_backend={simamba_backend!r}. "
@@ -145,10 +164,21 @@ class Simamba(nn.Module):
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=False, **factory_kwargs)
 
+    def _bounded_dynamics(self, dd_A, dd_dt):
+        _A = -F.softplus(dd_A.to(torch.float32))
+        if math.isfinite(self.A_max):
+            _A = torch.clamp(_A, min=-self.A_max, max=-self.A_floor)
+        else:
+            _A = torch.clamp(_A, max=-self.A_floor)
+        DT = F.softplus(dd_dt + self.dt_bias)
+        if self.dt_limit != (0.0, float("inf")):
+            DT = DT.clamp(min=self.dt_limit[0], max=self.dt_limit[1])
+        return _A, DT
+
     def forward(self, u, seq_idx=None, cu_seqlens=None, inference_params=None):
         del seq_idx
-        if cu_seqlens is not None and self.simamba_backend == SIMAMBA_BACKEND_REFERENCE:
-            raise NotImplementedError("Reference Simamba backend does not support varlen yet.")
+        if cu_seqlens is not None:
+            raise NotImplementedError("Simamba does not support cu_seqlens / variable-length mode.")
         if u.dim() != 3:
             raise ValueError(f"Expected input shape (batch, seqlen, d_model), got {u.shape}.")
 
@@ -214,9 +244,7 @@ class Simamba(nn.Module):
         simpson = rearrange(torch.sigmoid(simpson), "b l h -> b h l")
         midpoint = rearrange(torch.sigmoid(midpoint), "b l h -> b h l") if midpoint is not None else None
 
-        _A = -F.softplus(dd_A.to(torch.float32))
-        _A = torch.clamp(_A, max=-self.A_floor)
-        DT = F.softplus(dd_dt + self.dt_bias)
+        _A, DT = self._bounded_dynamics(dd_A, dd_dt)
         ADT = _A * DT
         DT = rearrange(DT, "b l n -> b n l")
         ADT = rearrange(ADT, "b l n -> b n l")
@@ -279,6 +307,7 @@ class Simamba(nn.Module):
                 D=self.D,
                 Z=z if not self.is_outproj_norm else None,
                 chunk_size=self.chunk_size,
+                recompute_chunk_size=self.recompute_chunk_size,
                 Initial_States=input_states,
                 return_final_states=input_states is not None,
                 cu_seqlens=cu_seqlens,
@@ -303,9 +332,7 @@ class Simamba(nn.Module):
         return out
 
     def _preprocess(self, A_proj, dd_dt, B, C, x, z, simpson_proj, angle_proj, midpoint_proj=None):
-        _A = -F.softplus(A_proj.to(torch.float32))
-        _A = torch.clamp(_A, max=-self.A_floor)
-        DT = F.softplus(dd_dt + self.dt_bias)
+        _A, DT = self._bounded_dynamics(A_proj, dd_dt)
         simpson = torch.sigmoid(simpson_proj)
         midpoint = torch.sigmoid(midpoint_proj) if midpoint_proj is not None else None
 
@@ -337,6 +364,12 @@ class Simamba(nn.Module):
         **kwargs,
     ):
         del kwargs
+
+        if self.num_bc_heads != 1:
+            raise NotImplementedError(
+                "Simamba incremental decode currently supports ngroups=1 only. "
+                f"Received ngroups={self.num_bc_heads}."
+            )
 
         if u.dim() == 3:
             if u.shape[1] != 1:
