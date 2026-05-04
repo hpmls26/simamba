@@ -376,6 +376,10 @@ Checkpoint & int8 & int4 & 10\% prune & 30\% prune\\
 \end{tabular}
 \end{table}
 
+\subsection{Qualified Positive Results}
+
+Although the headline language-model result is negative, three bounded positive results are worth recording. First, in the 500M-token comparison, \modelname{} Simpson+midpoint reaches a better best checkpoint than the matched \modelname{} trapezoid baseline (4.9178 vs. 4.9326), although it does not hold that advantage at the final validation point. Second, after adding matched local convolution, \modelname{} Simpson low-control beats the weakened \mambatwo{} $d_{\mathrm{conv}}=1$ control (5.8793 vs. 5.9001), which shows that part of the initial gap was a local-mixing confound. Third, the compression perturbations show that \modelname{} checkpoints are competitive in some post-training robustness settings: the midpoint checkpoint has a slightly smaller int8 loss delta than \mambatwo{} (+0.0014 vs. +0.0019), and the trapezoid checkpoint has lower int4 and pruning deltas. These are not enough to claim a \modelname{} architecture win, but they identify controlled settings where the implementation is competitive and worth improving.
+
 \subsection{Overall Result}
 
 The result summary is direct: the current Simpson recurrence is trainable but not superior. The strongest \modelname Simpson checkpoint is the midpoint-control model at 4.9178 validation loss, but the best overall language model is \mambatwo at 4.8625, and the matched trapezoid controls remain at least competitive across budgets.
