@@ -6,7 +6,7 @@ authors = [
     { name = "Tri Dao", email = "tri@tridao.me" },
     { name = "Albert Gu", email = "agu@cs.cmu.edu" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.9"
 dynamic = ["version"]
 license = { file = "LICENSE" }  # Include a LICENSE file in your repo
 keywords = ["cuda", "pytorch", "state-space model"]
@@ -39,10 +39,10 @@ causal-conv1d = [
     "causal-conv1d>=1.6.0; python_version >= '3.10'"
 ]
 triton = [
-    "triton>=3.5.0"
+    "triton>=3.2.0"
 ]
 mamba3 = [
-    "triton>=3.5.0",
+    "triton>=3.2.0",
     "tilelang==0.1.8",
     "quack-kernels==0.3.4"
 ]
@@ -53,7 +53,7 @@ full = [
     "zstandard",
     "causal-conv1d>=1.2.0,<1.6; python_version < '3.10'",
     "causal-conv1d>=1.6.0; python_version >= '3.10'",
-    "triton>=3.5.0",
+    "triton>=3.2.0",
     "tilelang==0.1.8",
     "quack-kernels==0.3.4"
 ]

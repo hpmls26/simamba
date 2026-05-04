@@ -48,6 +48,16 @@ def _zero_if_none(grad: Optional[Tensor], like: Tensor) -> Tensor:
     return torch.zeros_like(like) if grad is None else grad
 
 
+def _select_triton_value_dtype(tensor: Tensor) -> torch.dtype:
+    if tensor.dtype == torch.bfloat16:
+        if tensor.is_cuda and torch.cuda.get_device_properties(tensor.device).major < 8:
+            return torch.float16
+        return torch.bfloat16
+    if tensor.dtype in (torch.float16, torch.float32):
+        return tensor.dtype
+    return torch.float32
+
+
 _SEQUENCE_INPUT_NAMES = {
     "Q",
     "K",
@@ -790,14 +800,15 @@ def mamba3_siso_combined(
         Input_V_Prev2_State,
     ) = Initial_States if Initial_States is not None else (None, None, None, None, None, None)
 
-    Q = Q.to(torch.bfloat16)
-    K = K.to(torch.bfloat16)
-    V = V.to(torch.bfloat16)
-    Simpson = Simpson.to(torch.bfloat16)
-    Midpoint = Midpoint.to(torch.bfloat16) if Midpoint is not None else None
-    Angles = Angles.to(torch.bfloat16)
+    value_dtype = _select_triton_value_dtype(Q)
+    Q = Q.to(value_dtype)
+    K = K.to(value_dtype)
+    V = V.to(value_dtype)
+    Simpson = Simpson.to(value_dtype)
+    Midpoint = Midpoint.to(value_dtype) if Midpoint is not None else None
+    Angles = Angles.to(value_dtype)
     if Z is not None:
-        Z = Z.to(torch.bfloat16)
+        Z = Z.to(value_dtype)
 
     if recompute_chunk_size is None:
         recompute_chunk_size = chunk_size

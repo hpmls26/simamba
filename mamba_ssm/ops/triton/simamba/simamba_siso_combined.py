@@ -314,6 +314,184 @@ def simamba_siso_combined(
     return out
 
 
+def simamba_trapezoid_siso_combined(
+    Q: Tensor,
+    K: Tensor,
+    V: Tensor,
+    ADT: Tensor,
+    DT: Tensor,
+    Trap: Tensor,
+    Q_bias: Tensor,
+    K_bias: Tensor,
+    Angles: Tensor,
+    D: Optional[Tensor] = None,
+    Z: Optional[Tensor] = None,
+    Input_States: Optional[Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]] = None,
+    return_final_states: bool = False,
+    cu_seqlens: Optional[Tensor] = None,
+) -> Tensor | Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Reference exponential-trapezoid SISO pass with the Simamba interface.
+
+    This is a matched ablation baseline for Simamba: Q/K/V, biases, rotary
+    angle dynamics, D skip, Z gating, and parameter shapes are identical, while
+    the width-3 Simpson recurrence is replaced by the width-2 trapezoid update
+    used by the Mamba-3 SISO formulation.
+    """
+    if cu_seqlens is not None:
+        raise NotImplementedError("Trapezoid reference path does not support varlen yet.")
+
+    batch, seqlen, nheads_qk, headdim_qk = Q.shape
+    if K.shape != Q.shape:
+        raise ValueError(f"Q and K shape mismatch: {Q.shape} vs {K.shape}.")
+    if headdim_qk % 2 != 0:
+        raise ValueError(f"headdim_qk must be even, got {headdim_qk}.")
+
+    _, _, nheads, headdim_v = V.shape
+    if nheads % nheads_qk != 0:
+        raise ValueError(
+            f"nheads ({nheads}) must be divisible by nheads_qk ({nheads_qk})."
+        )
+    if ADT.shape != (batch, nheads, seqlen):
+        raise ValueError(f"ADT shape mismatch: got {ADT.shape}.")
+    if DT.shape != (batch, nheads, seqlen):
+        raise ValueError(f"DT shape mismatch: got {DT.shape}.")
+    if Trap.shape != (batch, nheads, seqlen):
+        raise ValueError(f"Trap shape mismatch: got {Trap.shape}.")
+    if Q_bias.shape != (nheads, headdim_qk):
+        raise ValueError(f"Q_bias shape mismatch: got {Q_bias.shape}.")
+    if K_bias.shape != (nheads, headdim_qk):
+        raise ValueError(f"K_bias shape mismatch: got {K_bias.shape}.")
+
+    if nheads_qk != nheads:
+        gqa_ratio = nheads // nheads_qk
+        Q = Q.repeat_interleave(gqa_ratio, dim=2)
+        K = K.repeat_interleave(gqa_ratio, dim=2)
+
+    n_angles = Angles.shape[-1]
+    if Angles.shape != (batch, seqlen, nheads, n_angles):
+        raise ValueError(f"Angles shape mismatch: got {Angles.shape}.")
+    if n_angles > headdim_qk // 2 or n_angles % 2 != 0:
+        raise ValueError(
+            f"Angles last dim must be even and <= headdim_qk//2, got {n_angles}."
+        )
+
+    if D is not None and D.shape != (nheads,):
+        raise ValueError(f"D shape mismatch: got {D.shape}.")
+    if Z is not None and Z.shape != (batch, seqlen, nheads, headdim_v):
+        raise ValueError(f"Z shape mismatch: got {Z.shape}.")
+
+    if Input_States is not None:
+        (
+            input_angle_state,
+            input_ssm_state,
+            input_k_prev1,
+            _input_k_prev2,
+            input_v_prev1,
+            _input_v_prev2,
+        ) = Input_States
+        if input_angle_state.shape != (batch, nheads, n_angles):
+            raise ValueError(f"Input angle state shape mismatch: got {input_angle_state.shape}.")
+        if input_ssm_state.shape != (batch, nheads, headdim_v, headdim_qk):
+            raise ValueError(f"Input SSM state shape mismatch: got {input_ssm_state.shape}.")
+        if input_k_prev1.shape != (batch, nheads, headdim_qk):
+            raise ValueError(f"Input K prev1 shape mismatch: got {input_k_prev1.shape}.")
+        if input_v_prev1.shape != (batch, nheads, headdim_v):
+            raise ValueError(f"Input V prev1 shape mismatch: got {input_v_prev1.shape}.")
+    else:
+        input_angle_state = None
+        input_ssm_state = torch.zeros(
+            (batch, nheads, headdim_v, headdim_qk),
+            device=Q.device,
+            dtype=torch.float32,
+        )
+        input_k_prev1 = torch.zeros((batch, nheads, headdim_qk), device=Q.device, dtype=torch.float32)
+        input_v_prev1 = torch.zeros((batch, nheads, headdim_v), device=Q.device, dtype=torch.float32)
+
+    angles_cumsum, final_angle_state = _compute_angle_cumsum(
+        Angles,
+        DT,
+        input_angle_state,
+    )
+
+    q_pre = Q + Q_bias[None, None, :, :]
+    k_pre = K + K_bias[None, None, :, :]
+    q_rot = _apply_pairwise_rotary(q_pre, angles_cumsum)
+    k_rot = _apply_pairwise_rotary(k_pre, angles_cumsum)
+
+    dt = DT.float()
+    trap = Trap.float().clamp(0.0, 1.0)
+
+    shifted = torch.zeros_like(dt)
+    if seqlen > 1:
+        shifted[:, :, :-1] = dt[:, :, 1:] * (1.0 - trap[:, :, 1:])
+    gamma = dt * trap
+    scale = gamma + shifted
+
+    if Input_States is None and not return_final_states:
+        da_cs = torch.cumsum(ADT.float(), dim=-1)
+        decay = torch.exp(da_cs[:, :, :, None] - da_cs[:, :, None, :])
+        positions = torch.arange(seqlen, device=Q.device)
+        strictly_causal = positions[:, None] > positions[None, :]
+        weights = torch.where(
+            strictly_causal[None, None],
+            decay * scale[:, :, None, :],
+            torch.zeros((), device=Q.device, dtype=decay.dtype),
+        )
+        weights = weights + torch.diag_embed(gamma)
+
+        qk_scores = torch.einsum("bthd,bshd->bhts", q_rot.float(), k_rot.float())
+        out_f = torch.einsum("bhts,bshp->bthp", qk_scores * weights, V.float())
+        if D is not None:
+            out_f = out_f + D.float()[None, None, :, None] * V.float()
+        if Z is not None:
+            out_f = out_f * F.silu(Z.float())
+        return out_f.to(V.dtype)
+
+    alpha = torch.exp(ADT.float())
+    ssm_state = input_ssm_state.float()
+    if Input_States is not None:
+        input_kv = input_v_prev1.float().unsqueeze(-1) * input_k_prev1.float().unsqueeze(-2)
+        input_scale = dt[:, :, 0] * (1.0 - trap[:, :, 0])
+        ssm_state = ssm_state + input_kv * input_scale[:, :, None, None]
+
+    out = torch.empty((batch, seqlen, nheads, headdim_v), device=V.device, dtype=V.dtype)
+    d_term = D.float()[None, :, None] if D is not None else None
+
+    for t in range(seqlen):
+        v_t = V[:, t].float()
+        q_t = q_rot[:, t].float()
+        k_t = k_rot[:, t].float()
+
+        decayed_state = alpha[:, :, t, None, None] * ssm_state
+        y_t = torch.einsum("bhpn,bhn->bhp", decayed_state, q_t)
+        qk_dot = torch.sum(q_t * k_t, dim=-1)
+        y_t = y_t + (gamma[:, :, t] * qk_dot)[:, :, None] * v_t
+        if d_term is not None:
+            y_t = y_t + d_term * v_t
+        if Z is not None:
+            y_t = y_t * F.silu(Z[:, t].float())
+        out[:, t] = y_t.to(V.dtype)
+
+        kv_t = v_t.unsqueeze(-1) * k_t.unsqueeze(-2)
+        ssm_state = decayed_state + scale[:, :, t, None, None] * kv_t
+
+    if return_final_states:
+        final_k_prev1 = k_rot[:, -1].to(K.dtype)
+        final_v_prev1 = V[:, -1].to(V.dtype)
+        final_k_prev2 = torch.zeros_like(final_k_prev1)
+        final_v_prev2 = torch.zeros_like(final_v_prev1)
+        return (
+            out,
+            final_angle_state,
+            ssm_state,
+            final_k_prev1,
+            final_k_prev2,
+            final_v_prev1,
+            final_v_prev2,
+        )
+    return out
+
+
 def simamba_siso_step(
     Q: Tensor,
     K: Tensor,

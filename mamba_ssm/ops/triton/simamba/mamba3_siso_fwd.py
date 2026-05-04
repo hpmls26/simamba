@@ -821,7 +821,7 @@ def mamba3_siso_fwd(
             chunk_ssm_starts = torch.empty(
                 (batch, nheads, nchunks, headdim_v, headdim_qk),
                 device=Q.device,
-                dtype=torch.bfloat16,
+                dtype=torch.float32,
             )
             chunk_k_prev1_starts = torch.empty(
                 (batch, nheads, nchunks, headdim_qk),

@@ -84,8 +84,17 @@ DEFAULT_DATA_DIR="/insomnia001/home/ssb2234/slimpajama_smoke"
 DEFAULT_OUT_ROOT="/insomnia001/home/ssb2234/simamba_compare_smoke"
 DATA_DIR="${1:-${DEFAULT_DATA_DIR}}"
 OUT_ROOT="${2:-${DEFAULT_OUT_ROOT}}"
-GPUS="${GPUS:-4}"
-EXPECTED_GPU_NAME="${EXPECTED_GPU_NAME:-A6000}"
+if [[ -z "${GPUS:-}" ]]; then
+  if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    IFS=',' read -r -a visible_devices <<< "${CUDA_VISIBLE_DEVICES}"
+    GPUS="${#visible_devices[@]}"
+  elif command -v nvidia-smi >/dev/null 2>&1; then
+    GPUS="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l | tr -d '[:space:]')"
+  else
+    GPUS=4
+  fi
+fi
+EXPECTED_GPU_NAME="${EXPECTED_GPU_NAME:-}"
 
 if [[ -z "${DATA_DIR}" || -z "${OUT_ROOT}" ]]; then
   echo "usage: bash scripts/run_compare_smoke_a6000.sh DATA_DIR OUTPUT_ROOT" >&2
@@ -143,7 +152,7 @@ COMMON_ARGS=(
   --eval-every 100
   --eval-iters 10
   --keep-milestones 1
-  --dtype bf16
+  --dtype auto
   --wandb
   --wandb-project "${WANDB_PROJECT}"
   --wandb-entity "${WANDB_ENTITY}"

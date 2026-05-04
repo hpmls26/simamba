@@ -59,14 +59,7 @@ def tanh_approx(x):
     Returns:
         Approximate tanh values in float32
     """
-    return tl.inline_asm_elementwise(
-        "tanh.approx.f32 $0, $1;",
-        constraints="=f,f",
-        args=[x],
-        dtype=tl.float32,
-        is_pure=True,
-        pack=1,
-    )
+    return 2.0 * tl.sigmoid(2.0 * x) - 1.0
 
 @triton.jit
 def sech2_approx(x):
@@ -78,14 +71,7 @@ def sech2_approx(x):
     Returns:
         Approximate sech^2 values in float32
     """
-    tanh_x = tl.inline_asm_elementwise(
-        "tanh.approx.f32 $0, $1;",
-        constraints="=f,f",
-        args=[x],
-        dtype=tl.float32,
-        is_pure=True,
-        pack=1,
-    )
+    tanh_x = tanh_approx(x)
     return 1.0 - tanh_x * tanh_x
 
 @triton.jit

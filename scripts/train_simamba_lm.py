@@ -116,8 +116,45 @@ def parse_args():
     parser.add_argument("--simamba-chunk-size", type=int, default=64)
     parser.add_argument("--simamba-recompute-chunk-size", type=int, default=None)
     parser.add_argument("--simamba-dt-limit", type=float, nargs=2, default=(1e-3, 0.1))
-    parser.add_argument("--simamba-a-max", type=float, default=16.0)
+    parser.add_argument(
+        "--simamba-a-max",
+        type=float,
+        default=None,
+        help=(
+            "Upper bound for -A in Simamba dynamics. Defaults to 4.0 for "
+            "Simamba Triton fp16 CUDA runs to avoid V100 fp16 scan overflow, "
+            "and 16.0 otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--simamba-d-conv",
+        type=int,
+        default=0,
+        help=(
+            "Depthwise causal local convolution width over the concatenated Simamba x/B/C stream. "
+            "0 preserves the original no-local-conv Simamba block; 4 matches the default Mamba2 local mixing width."
+        ),
+    )
     parser.add_argument("--simamba-use-midpoint-control", action="store_true")
+    parser.add_argument(
+        "--simamba-control-logit-offset",
+        type=float,
+        default=0.0,
+        help=(
+            "Fixed logit offset added before sigmoid for the Simamba Simpson/trapezoid "
+            "control projection. Negative values initialize the control closer to zero."
+        ),
+    )
+    parser.add_argument(
+        "--simamba-midpoint-logit-offset",
+        type=float,
+        default=0.0,
+        help=(
+            "Fixed logit offset added before sigmoid for the optional Simamba midpoint "
+            "control projection."
+        ),
+    )
+    parser.add_argument("--simamba-discretization", choices=["simpson", "trapezoid"], default="simpson")
     parser.add_argument("--simamba-backend", choices=["reference", "triton"], default="triton")
     parser.add_argument("--simamba-outproj-norm", action="store_true")
     parser.add_argument("--mamba2-d-state", type=int, default=128)
@@ -141,12 +178,60 @@ def parse_args():
     parser.add_argument("--seq-len", type=int, default=2048)
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--micro-batch-size", type=int, default=8)
+    parser.add_argument(
+        "--train-sampling",
+        choices=["epoch", "random"],
+        default="epoch",
+        help=(
+            "Training sample order. 'epoch' uses shuffled non-overlapping token blocks "
+            "without replacement within each pass through the .bin file; 'random' keeps "
+            "the previous with-replacement random-span sampling."
+        ),
+    )
+    parser.add_argument(
+        "--eval-sampling",
+        choices=["fixed", "random"],
+        default="fixed",
+        help=(
+            "Validation sample order. 'fixed' evaluates the same deterministic token spans "
+            "every time; 'random' keeps the previous random-span validation."
+        ),
+    )
+    parser.add_argument(
+        "--eval-seed",
+        type=int,
+        default=None,
+        help="Seed for fixed validation spans. Defaults to --seed + 100000.",
+    )
     parser.add_argument("--max-steps", type=int, default=10000)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--min-lr", type=float, default=1e-5)
     parser.add_argument("--weight-decay", type=float, default=0.1)
     parser.add_argument("--betas", type=float, nargs=2, default=(0.9, 0.98))
     parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument(
+        "--grad-scale-init",
+        type=float,
+        default=8192.0,
+        help="Initial CUDA GradScaler scale for fp16 training.",
+    )
+    parser.add_argument(
+        "--grad-scale-growth-interval",
+        type=int,
+        default=2000,
+        help="GradScaler growth interval for fp16 training.",
+    )
+    parser.add_argument(
+        "--skip-nonfinite-steps",
+        action="store_true",
+        help="Skip optimizer updates with nonfinite loss/gradients instead of aborting.",
+    )
+    parser.add_argument(
+        "--max-nonfinite-skips",
+        type=int,
+        default=100,
+        help="Stop training after this many skipped nonfinite steps; <=0 disables the limit.",
+    )
     parser.add_argument("--warmup-steps", type=int, default=2000)
     parser.add_argument("--log-every", type=int, default=1)
     parser.add_argument("--eval-every", type=int, default=500)
@@ -161,8 +246,13 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=1337)
 
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
+    parser.add_argument("--dtype", choices=["auto", "bf16", "fp16", "fp32"], default="auto")
     parser.add_argument("--compile", action="store_true", help="Use torch.compile if available.")
+    parser.add_argument(
+        "--ddp-find-unused-parameters",
+        action="store_true",
+        help="Enable DDP unused-parameter detection for debugging only.",
+    )
 
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb-project", default="simamba-pretrain")
@@ -175,6 +265,11 @@ def parse_args():
         choices=["allow", "never", "must", "auto"],
         default=None,
         help="Optional W&B resume policy when --wandb-id is set or recovered from a checkpoint.",
+    )
+    parser.add_argument(
+        "--ignore-resume-wandb",
+        action="store_true",
+        help="Load model/optimizer state from --resume but start a fresh W&B run.",
     )
     parser.add_argument(
         "--wandb-console",
@@ -217,18 +312,120 @@ class PackedTokenDataset:
         self.tokens = np.memmap(path, mode="r", dtype=dtype_map[dtype_name])
         self.size = int(self.tokens.shape[0])
 
-    def sample_batch(self, batch_size: int, seq_len: int, device: torch.device):
+    def max_start(self, seq_len: int) -> int:
         max_start = self.size - seq_len - 1
-        if max_start <= 0:
+        if max_start < 0:
             raise ValueError(f"Dataset {self.size} too small for seq_len={seq_len}.")
-        starts = torch.randint(0, max_start, (batch_size,))
-        x = torch.empty((batch_size, seq_len), dtype=torch.long)
-        y = torch.empty((batch_size, seq_len), dtype=torch.long)
-        for i, start in enumerate(starts.tolist()):
+        return max_start
+
+    def batch_from_starts(self, starts, seq_len: int, device: torch.device):
+        x = torch.empty((len(starts), seq_len), dtype=torch.long)
+        y = torch.empty((len(starts), seq_len), dtype=torch.long)
+        for i, start in enumerate(starts):
+            start = int(start)
             chunk = np.asarray(self.tokens[start : start + seq_len + 1], dtype=np.int64)
             x[i] = torch.from_numpy(chunk[:-1].copy())
             y[i] = torch.from_numpy(chunk[1:].copy())
         return x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+
+    def sample_batch(self, batch_size: int, seq_len: int, device: torch.device):
+        starts = torch.randint(0, self.max_start(seq_len) + 1, (batch_size,))
+        return self.batch_from_starts(starts.tolist(), seq_len, device)
+
+
+class EpochBlockSampler:
+    def __init__(
+        self,
+        dataset: PackedTokenDataset,
+        *,
+        batch_size: int,
+        seq_len: int,
+        device: torch.device,
+        rank: int,
+        world_size: int,
+        seed: int,
+        start_step: int,
+        grad_accum_steps: int,
+    ):
+        self.dataset = dataset
+        self.batch_size = int(batch_size)
+        self.seq_len = int(seq_len)
+        self.device = device
+        self.rank = int(rank)
+        self.world_size = int(world_size)
+        self.seed = int(seed)
+        self.global_batch_size = self.batch_size * self.world_size
+        self.num_blocks = self.dataset.max_start(self.seq_len) // self.seq_len + 1
+        if self.num_blocks <= 0:
+            raise ValueError(f"Dataset {self.dataset.size} too small for seq_len={self.seq_len}.")
+        self.blocks_consumed = (
+            int(start_step) * int(grad_accum_steps) * self.global_batch_size
+        )
+        self._cached_epoch = None
+        self._cached_permutation = None
+
+    def _permutation_for_epoch(self, epoch: int):
+        if self._cached_epoch != epoch:
+            rng = np.random.default_rng(self.seed + int(epoch))
+            self._cached_permutation = rng.permutation(self.num_blocks)
+            self._cached_epoch = int(epoch)
+        return self._cached_permutation
+
+    def sample_batch(self):
+        rank_offset = self.rank * self.batch_size
+        starts = []
+        for local_idx in range(self.batch_size):
+            global_position = self.blocks_consumed + rank_offset + local_idx
+            epoch, block_offset = divmod(global_position, self.num_blocks)
+            block_id = int(self._permutation_for_epoch(epoch)[block_offset])
+            starts.append(block_id * self.seq_len)
+        self.blocks_consumed += self.global_batch_size
+        return self.dataset.batch_from_starts(starts, self.seq_len, self.device)
+
+    @property
+    def epoch(self) -> int:
+        return self.blocks_consumed // self.num_blocks
+
+    @property
+    def epoch_progress(self) -> float:
+        return (self.blocks_consumed % self.num_blocks) / self.num_blocks
+
+
+class FixedValidationSampler:
+    def __init__(
+        self,
+        dataset: PackedTokenDataset,
+        *,
+        batch_size: int,
+        seq_len: int,
+        device: torch.device,
+        eval_iters: int,
+        rank: int,
+        world_size: int,
+        seed: int,
+    ):
+        self.dataset = dataset
+        self.batch_size = int(batch_size)
+        self.seq_len = int(seq_len)
+        self.device = device
+        self.eval_iters = int(eval_iters)
+        self.rank = int(rank)
+        self.world_size = int(world_size)
+        self.seed = int(seed)
+        self.global_batch_size = self.batch_size * self.world_size
+        max_start = self.dataset.max_start(self.seq_len)
+        rng = np.random.default_rng(self.seed)
+        global_starts = rng.integers(
+            0,
+            max_start + 1,
+            size=(self.eval_iters, self.global_batch_size),
+            dtype=np.int64,
+        )
+        rank_slice = slice(self.rank * self.batch_size, (self.rank + 1) * self.batch_size)
+        self.starts = np.ascontiguousarray(global_starts[:, rank_slice])
+
+    def sample_batch(self, eval_iter: int):
+        return self.dataset.batch_from_starts(self.starts[int(eval_iter)], self.seq_len, self.device)
 
 
 def make_config(args):
@@ -243,7 +440,11 @@ def make_config(args):
             "recompute_chunk_size": args.simamba_recompute_chunk_size,
             "dt_limit": tuple(args.simamba_dt_limit),
             "A_max": args.simamba_a_max,
+            "d_conv": args.simamba_d_conv,
             "use_midpoint_control": args.simamba_use_midpoint_control,
+            "control_logit_offset": args.simamba_control_logit_offset,
+            "midpoint_logit_offset": args.simamba_midpoint_logit_offset,
+            "discretization": args.simamba_discretization,
             "simamba_backend": args.simamba_backend,
             "is_outproj_norm": args.simamba_outproj_norm,
         }
@@ -299,6 +500,50 @@ def get_amp_dtype(dtype_name: str):
     }[dtype_name]
 
 
+def cuda_device_supports_bf16(device: torch.device) -> bool:
+    if device.type != "cuda":
+        return False
+    props = torch.cuda.get_device_properties(device)
+    return props.major >= 8
+
+
+def resolve_dtype_name(dtype_name: str, device: torch.device) -> str:
+    if dtype_name == "auto":
+        if device.type != "cuda":
+            return "fp32"
+        return "bf16" if cuda_device_supports_bf16(device) else "fp16"
+    if dtype_name == "bf16" and device.type == "cuda" and not cuda_device_supports_bf16(device):
+        props = torch.cuda.get_device_properties(device)
+        raise ValueError(
+            f"--dtype bf16 was requested, but {props.name} "
+            f"(compute capability {props.major}.{props.minor}) does not support CUDA bf16. "
+            "Use --dtype auto or --dtype fp16 on V100-class GPUs."
+        )
+    return dtype_name
+
+
+def resolve_simamba_a_max(args, device: torch.device) -> tuple[float, Optional[float], Optional[float]]:
+    requested_a_max = args.simamba_a_max
+    if args.model_layer != "Simamba":
+        return float(requested_a_max) if requested_a_max is not None else 16.0, requested_a_max, None
+
+    fp16_triton_cuda = (
+        args.dtype == "fp16"
+        and args.simamba_backend == "triton"
+        and device.type == "cuda"
+    )
+    if requested_a_max is None:
+        effective_a_max = 4.0 if fp16_triton_cuda else 16.0
+    else:
+        effective_a_max = float(requested_a_max)
+
+    stability_product = None
+    if fp16_triton_cuda:
+        dt_max = float(args.simamba_dt_limit[1])
+        stability_product = effective_a_max * dt_max * int(args.simamba_chunk_size)
+    return effective_a_max, requested_a_max, stability_product
+
+
 def cast_optimizer_state_(optimizer):
     for param, state in optimizer.state.items():
         for key, value in state.items():
@@ -308,6 +553,25 @@ def cast_optimizer_state_(optimizer):
                 state[key] = value.to(device=param.device, dtype=param.dtype)
             else:
                 state[key] = value.to(device=param.device)
+
+
+def grad_health(model, *, max_names: int = 20):
+    raw_model = model.module if isinstance(model, DDP) else model
+    missing = []
+    nonfinite = []
+    for name, parameter in raw_model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if parameter.grad is None:
+            missing.append(name)
+        elif not torch.isfinite(parameter.grad).all():
+            nonfinite.append(name)
+    return {
+        "missing_count": len(missing),
+        "missing_names": missing[:max_names],
+        "nonfinite_count": len(nonfinite),
+        "nonfinite_names": nonfinite[:max_names],
+    }
 
 
 def lr_for_step(step: int, args):
@@ -412,11 +676,14 @@ def load_checkpoint(path: Path, model, optimizer=None):
 
 
 @torch.no_grad()
-def evaluate(model, dataset, args, device, amp_ctx):
+def evaluate(model, dataset, args, device, amp_ctx, fixed_sampler: Optional[FixedValidationSampler] = None):
     model.eval()
     losses = []
-    for _ in range(args.eval_iters):
-        x, y = dataset.sample_batch(args.micro_batch_size, args.seq_len, device)
+    for eval_iter in range(args.eval_iters):
+        if fixed_sampler is not None:
+            x, y = fixed_sampler.sample_batch(eval_iter)
+        else:
+            x, y = dataset.sample_batch(args.micro_batch_size, args.seq_len, device)
         with amp_ctx():
             logits = model(x).logits
             loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
@@ -519,6 +786,13 @@ def save_training_snapshot(
 def main():
     process_start = time.perf_counter()
     args = parse_args()
+    if args.model_layer == "Simamba" and args.simamba_discretization == "trapezoid":
+        if args.simamba_backend != "reference":
+            raise ValueError(
+                "--simamba-discretization trapezoid currently requires --simamba-backend reference."
+            )
+        if args.simamba_use_midpoint_control:
+            raise ValueError("--simamba-use-midpoint-control is only valid with Simpson discretization.")
     emit_status(
         "startup.args_parsed",
         distributed_env=("RANK" in os.environ),
@@ -543,7 +817,48 @@ def main():
         local_rank=local_rank,
     )
     device = torch.device(f"cuda:{local_rank}" if distributed else args.device)
-    emit_status("runtime.device_ready", rank=rank, device=str(device), dtype=args.dtype, param_dtype=str(get_param_dtype(args.dtype)))
+    requested_dtype = args.dtype
+    args.dtype = resolve_dtype_name(args.dtype, device)
+    (
+        args.simamba_a_max,
+        requested_simamba_a_max,
+        simamba_fp16_stability_product,
+    ) = resolve_simamba_a_max(args, device)
+    emit_status(
+        "runtime.device_ready",
+        rank=rank,
+        device=str(device),
+        requested_dtype=requested_dtype,
+        dtype=args.dtype,
+        param_dtype=str(get_param_dtype(args.dtype)),
+        cuda_bf16_supported=(cuda_device_supports_bf16(device) if device.type == "cuda" else None),
+    )
+    if args.model_layer == "Simamba":
+        emit_status(
+            "runtime.simamba_dynamics_ready",
+            rank=rank,
+            requested_a_max=requested_simamba_a_max,
+            effective_a_max=args.simamba_a_max,
+            dt_limit=list(args.simamba_dt_limit),
+            chunk_size=args.simamba_chunk_size,
+            discretization=args.simamba_discretization,
+            backend=args.simamba_backend,
+            fp16_stability_product=simamba_fp16_stability_product,
+        )
+        if (
+            args.dtype == "fp16"
+            and args.simamba_backend == "triton"
+            and simamba_fp16_stability_product is not None
+            and simamba_fp16_stability_product > 8.0
+        ):
+            emit_status(
+                "runtime.simamba_fp16_stability_warning",
+                rank=rank,
+                effective_a_max=args.simamba_a_max,
+                dt_max=float(args.simamba_dt_limit[1]),
+                chunk_size=args.simamba_chunk_size,
+                product=simamba_fp16_stability_product,
+            )
 
     phase_start = time.perf_counter()
     torch.manual_seed(args.seed + rank)
@@ -607,6 +922,8 @@ def main():
         cast_optimizer_state_(optimizer)
         start_step = resume_state["resume_step"]
         resume_wandb = resume_state.get("wandb")
+        if args.ignore_resume_wandb:
+            resume_wandb = None
         emit_status(
             "checkpoint.resume.end",
             rank=rank,
@@ -619,16 +936,78 @@ def main():
     if distributed:
         phase_start = time.perf_counter()
         emit_status("ddp.wrap.begin", rank=rank)
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
-        emit_status("ddp.wrap.end", rank=rank, duration_sec=round(time.perf_counter() - phase_start, 3))
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            broadcast_buffers=False,
+            find_unused_parameters=args.ddp_find_unused_parameters,
+        )
+        emit_status(
+            "ddp.wrap.end",
+            rank=rank,
+            duration_sec=round(time.perf_counter() - phase_start, 3),
+            find_unused_parameters=args.ddp_find_unused_parameters,
+        )
 
-    scaler = torch.amp.GradScaler("cuda", enabled=(args.dtype == "fp16" and device.type == "cuda"))
-    amp_dtype = get_amp_dtype(args.dtype)
-    amp_ctx = (
-        lambda: torch.autocast(device_type=device.type, dtype=amp_dtype)
-        if args.dtype != "fp32"
-        else nullcontext
+    args.eval_seed = args.eval_seed if args.eval_seed is not None else args.seed + 100000
+    train_sampler = None
+    if args.train_sampling == "epoch":
+        train_sampler = EpochBlockSampler(
+            train_data,
+            batch_size=args.micro_batch_size,
+            seq_len=args.seq_len,
+            device=device,
+            rank=rank,
+            world_size=world_size,
+            seed=args.seed,
+            start_step=start_step,
+            grad_accum_steps=grad_accum_steps,
+        )
+
+    fixed_val_sampler = None
+    if val_data is not None and args.eval_sampling == "fixed":
+        fixed_val_sampler = FixedValidationSampler(
+            val_data,
+            batch_size=args.micro_batch_size,
+            seq_len=args.seq_len,
+            device=device,
+            eval_iters=args.eval_iters,
+            rank=rank,
+            world_size=world_size,
+            seed=args.eval_seed,
+        )
+
+    emit_status(
+        "dataset.sampling_ready",
+        rank=rank,
+        train_sampling=args.train_sampling,
+        train_blocks=(train_sampler.num_blocks if train_sampler is not None else None),
+        train_sampler_epoch=(int(train_sampler.epoch) if train_sampler is not None else None),
+        train_sampler_epoch_progress=(
+            round(float(train_sampler.epoch_progress), 6) if train_sampler is not None else None
+        ),
+        eval_sampling=(args.eval_sampling if val_data is not None else None),
+        eval_seed=(args.eval_seed if fixed_val_sampler is not None else None),
+        fixed_eval_batches=(args.eval_iters if fixed_val_sampler is not None else None),
+        fixed_eval_global_examples=(
+            args.eval_iters * args.micro_batch_size * world_size
+            if fixed_val_sampler is not None
+            else None
+        ),
     )
+
+    scaler = torch.amp.GradScaler(
+        "cuda",
+        enabled=(args.dtype == "fp16" and device.type == "cuda"),
+        init_scale=args.grad_scale_init,
+        growth_interval=args.grad_scale_growth_interval,
+    )
+    amp_dtype = get_amp_dtype(args.dtype)
+    if args.dtype != "fp32":
+        amp_ctx = lambda: torch.autocast(device_type=device.type, dtype=amp_dtype)
+    else:
+        amp_ctx = nullcontext
 
     wandb_run = None
     if args.wandb and is_master(rank):
@@ -674,6 +1053,8 @@ def main():
     tokens_per_step = args.global_batch_size * args.seq_len
     last_log_time = time.time()
     best_val_loss: Optional[float] = None
+    nonfinite_skip_count = 0
+    amp_overflow_skip_count = 0
     emit_status(
         "train.loop.begin",
         rank=rank,
@@ -722,7 +1103,10 @@ def main():
                 )
             sync_context = model.no_sync() if distributed and micro_step + 1 < grad_accum_steps else nullcontext()
             with sync_context:
-                x, y = train_data.sample_batch(args.micro_batch_size, args.seq_len, device)
+                if train_sampler is not None:
+                    x, y = train_sampler.sample_batch()
+                else:
+                    x, y = train_data.sample_batch(args.micro_batch_size, args.seq_len, device)
                 with amp_ctx():
                     logits = model(x).logits
                     loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1))
@@ -739,6 +1123,25 @@ def main():
                     loss=float(loss.detach().item() * grad_accum_steps),
                 )
 
+        health = grad_health(model)
+        health_missing = torch.tensor(health["missing_count"], device=device, dtype=torch.int32)
+        health_nonfinite = torch.tensor(health["nonfinite_count"], device=device, dtype=torch.int32)
+        if distributed:
+            dist.all_reduce(health_missing, op=dist.ReduceOp.SUM)
+            dist.all_reduce(health_nonfinite, op=dist.ReduceOp.SUM)
+        if int(health_missing.item()) > 0 or int(health_nonfinite.item()) > 0:
+            emit_status(
+                "train.grad_health",
+                rank=rank,
+                step=step,
+                local_missing_count=health["missing_count"],
+                local_missing_names=health["missing_names"],
+                local_nonfinite_count=health["nonfinite_count"],
+                local_nonfinite_names=health["nonfinite_names"],
+                global_missing_count=int(health_missing.item()),
+                global_nonfinite_count=int(health_nonfinite.item()),
+            )
+
         grad_norm_post_clip = torch.zeros((), device=device)
         if args.grad_clip > 0:
             scaler.unscale_(optimizer)
@@ -748,15 +1151,82 @@ def main():
 
         loss_is_finite = bool(torch.isfinite(loss_accum).item())
         grad_norm_is_finite = bool(torch.isfinite(grad_norm).item())
-        finite_step = torch.tensor(
-            1 if (loss_is_finite and grad_norm_is_finite) else 0,
-            device=device,
-            dtype=torch.int32,
-        )
+        loss_finite_step = torch.tensor(1 if loss_is_finite else 0, device=device, dtype=torch.int32)
+        grad_norm_finite_step = torch.tensor(1 if grad_norm_is_finite else 0, device=device, dtype=torch.int32)
         if distributed:
-            dist.all_reduce(finite_step, op=dist.ReduceOp.MIN)
-        if int(finite_step.item()) == 0:
+            dist.all_reduce(loss_finite_step, op=dist.ReduceOp.MIN)
+            dist.all_reduce(grad_norm_finite_step, op=dist.ReduceOp.MIN)
+        global_loss_is_finite = bool(int(loss_finite_step.item()))
+        global_grad_norm_is_finite = bool(int(grad_norm_finite_step.item()))
+        if not (global_loss_is_finite and global_grad_norm_is_finite):
             optimizer.zero_grad(set_to_none=True)
+            if global_loss_is_finite and scaler.is_enabled():
+                amp_overflow_skip_count += 1
+                scaler.update()
+                next_step_to_run = step + 1
+                emit_status(
+                    "train.amp_overflow_skipped",
+                    rank=rank,
+                    step=step,
+                    lr=lr,
+                    grad_norm_finite=grad_norm_is_finite,
+                    grad_norm=(float(grad_norm.item()) if grad_norm_is_finite else None),
+                    amp_overflow_skip_count=amp_overflow_skip_count,
+                    grad_scale=float(scaler.get_scale()),
+                )
+                if is_master(rank):
+                    metrics = {
+                        "step": step,
+                        "train/amp_overflow_skip": 1,
+                        "train/amp_overflow_skip_count": amp_overflow_skip_count,
+                        "train/lr": lr,
+                        "train/grad_scale": float(scaler.get_scale()),
+                    }
+                    print(json.dumps(metrics), flush=True)
+                    if wandb_run is not None:
+                        wandb_run.log(metrics, step=step)
+                continue
+            if args.skip_nonfinite_steps:
+                nonfinite_skip_count += 1
+                if scaler.is_enabled():
+                    scaler.update()
+                next_step_to_run = step + 1
+                emit_status(
+                    "train.nonfinite_skipped",
+                    rank=rank,
+                    step=step,
+                    lr=lr,
+                    loss_finite=loss_is_finite,
+                    grad_norm_finite=grad_norm_is_finite,
+                    global_loss_finite=global_loss_is_finite,
+                    global_grad_norm_finite=global_grad_norm_is_finite,
+                    loss=(float(loss_accum.item()) if loss_is_finite else None),
+                    grad_norm=(float(grad_norm.item()) if grad_norm_is_finite else None),
+                    nonfinite_skip_count=nonfinite_skip_count,
+                    max_nonfinite_skips=args.max_nonfinite_skips,
+                    grad_scale=(float(scaler.get_scale()) if scaler.is_enabled() else None),
+                )
+                if is_master(rank):
+                    metrics = {
+                        "step": step,
+                        "train/nonfinite_skip": 1,
+                        "train/nonfinite_skip_count": nonfinite_skip_count,
+                        "train/lr": lr,
+                    }
+                    print(json.dumps(metrics), flush=True)
+                    if wandb_run is not None:
+                        wandb_run.log(metrics, step=step)
+                if args.max_nonfinite_skips > 0 and nonfinite_skip_count >= args.max_nonfinite_skips:
+                    stop_requested = True
+                    stop_signal = "NONFINITE_SKIP_LIMIT"
+                    emit_status(
+                        "train.nonfinite_skip_limit",
+                        rank=rank,
+                        step=step,
+                        nonfinite_skip_count=nonfinite_skip_count,
+                    )
+                    break
+                continue
             stop_requested = True
             stop_signal = "NONFINITE"
             emit_status(
@@ -812,12 +1282,15 @@ def main():
                 "train/grad_clip_coef": float(grad_clip_coef.item()),
                 "train/tokens_per_sec": tokens_per_sec,
             }
+            if train_sampler is not None:
+                metrics["train/sampler_epoch"] = int(train_sampler.epoch)
+                metrics["train/sampler_epoch_progress"] = float(train_sampler.epoch_progress)
             print(json.dumps(metrics), flush=True)
             if wandb_run is not None:
                 wandb_run.log(metrics, step=step)
 
         if val_data is not None and step > 0 and step % args.eval_every == 0:
-            val_loss = evaluate(model, val_data, args, device, amp_ctx)
+            val_loss = evaluate(model, val_data, args, device, amp_ctx, fixed_val_sampler)
             if distributed:
                 dist.all_reduce(val_loss, op=dist.ReduceOp.AVG)
             if is_master(rank):

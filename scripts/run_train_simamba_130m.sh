@@ -156,13 +156,13 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 #   GRAD_CLIP=1.0
 #   SIMAMBA_DT_LIMIT_MIN=0.001
 #   SIMAMBA_DT_LIMIT_MAX=0.1
-#   SIMAMBA_A_MAX=16.0
+#   SIMAMBA_A_MAX=auto
 #   SIMAMBA_OUTPROJ_NORM=1
 #   MAX_STEPS=10000
 #   SAVE_EVERY=25
 #   EVAL_EVERY=500
 #   KEEP_MILESTONES=4
-#   DTYPE=bf16
+#   DTYPE=auto
 #   COMPILE=0
 #   RESUME_CHECKPOINT=/path/to/trainer.pt
 #   GCS_EXPORT=1
@@ -322,6 +322,10 @@ detect_allocated_gpus() {
       return
     fi
   fi
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l | tr -d '[:space:]'
+    return
+  fi
   echo ""
 }
 
@@ -376,7 +380,7 @@ validate_gpu_inventory() {
 
 ALLOCATED_GPUS="$(detect_allocated_gpus)"
 GPUS="${CLI_GPUS:-${GPUS:-${ALLOCATED_GPUS:-4}}}"
-EXPECTED_GPU_NAME="${CLI_EXPECTED_GPU_NAME:-${EXPECTED_GPU_NAME:-A6000}}"
+EXPECTED_GPU_NAME="${CLI_EXPECTED_GPU_NAME:-${EXPECTED_GPU_NAME:-}}"
 
 if [[ -n "${ALLOCATED_GPUS}" && "${ALLOCATED_GPUS}" != "${GPUS}" ]]; then
   echo "GPU mismatch: launcher is configured for GPUS=${GPUS}, but the allocation exposes ${ALLOCATED_GPUS} GPUs." >&2
@@ -386,8 +390,17 @@ fi
 
 validate_gpu_inventory "${EXPECTED_GPU_NAME}" "${GPUS}"
 
-SEQ_LEN="${SEQ_LEN:-2048}"
-GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-32}"
+FIRST_GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n 1 || true)"
+if [[ "${FIRST_GPU_NAME}" == *"V100"* ]]; then
+  DEFAULT_SEQ_LEN=512
+  DEFAULT_GLOBAL_BATCH_SIZE=4
+else
+  DEFAULT_SEQ_LEN=2048
+  DEFAULT_GLOBAL_BATCH_SIZE=32
+fi
+
+SEQ_LEN="${SEQ_LEN:-${DEFAULT_SEQ_LEN}}"
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-${DEFAULT_GLOBAL_BATCH_SIZE}}"
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 MAX_STEPS="${MAX_STEPS:-10000}"
 LR="${LR:-2e-5}"
@@ -401,11 +414,11 @@ SAVE_EVERY="${SAVE_EVERY:-25}"
 EVAL_EVERY="${EVAL_EVERY:-500}"
 KEEP_MILESTONES="${KEEP_MILESTONES:-4}"
 LOG_EVERY="${LOG_EVERY:-1}"
-DTYPE="${DTYPE:-bf16}"
+DTYPE="${DTYPE:-auto}"
 SIMAMBA_CHUNK_SIZE="${SIMAMBA_CHUNK_SIZE:-64}"
 SIMAMBA_DT_LIMIT_MIN="${SIMAMBA_DT_LIMIT_MIN:-0.001}"
 SIMAMBA_DT_LIMIT_MAX="${SIMAMBA_DT_LIMIT_MAX:-0.1}"
-SIMAMBA_A_MAX="${SIMAMBA_A_MAX:-16.0}"
+SIMAMBA_A_MAX="${SIMAMBA_A_MAX:-auto}"
 SIMAMBA_OUTPROJ_NORM="${SIMAMBA_OUTPROJ_NORM:-1}"
 if [[ -n "${SIMAMBA_RECOMPUTE_CHUNK_SIZE:-}" ]]; then
   SIMAMBA_RECOMPUTE_CHUNK_SIZE="${SIMAMBA_RECOMPUTE_CHUNK_SIZE}"
@@ -523,7 +536,6 @@ ARGS=(
   --simamba-chunk-size "${SIMAMBA_CHUNK_SIZE}"
   --simamba-recompute-chunk-size "${SIMAMBA_RECOMPUTE_CHUNK_SIZE}"
   --simamba-dt-limit "${SIMAMBA_DT_LIMIT_MIN}" "${SIMAMBA_DT_LIMIT_MAX}"
-  --simamba-a-max "${SIMAMBA_A_MAX}"
   --wandb
   --wandb-project "${WANDB_PROJECT}"
   --wandb-entity "${WANDB_ENTITY}"
@@ -531,6 +543,10 @@ ARGS=(
   --wandb-group "${WANDB_GROUP}"
   --wandb-console "${WANDB_CONSOLE}"
 )
+
+if [[ "${SIMAMBA_A_MAX}" != "auto" ]]; then
+  ARGS+=(--simamba-a-max "${SIMAMBA_A_MAX}")
+fi
 
 if [[ "${SIMAMBA_OUTPROJ_NORM}" == "1" ]]; then
   ARGS+=(--simamba-outproj-norm)

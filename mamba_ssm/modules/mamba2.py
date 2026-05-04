@@ -227,14 +227,15 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                     )
                     conv_state.copy_(conv_varlen_states)
             assert self.activation in ["silu", "swish"]
-            if causal_conv1d_fn is None or self.activation not in ["silu", "swish"]:
+            if self.d_conv == 1 or causal_conv1d_fn is None or self.activation not in ["silu", "swish"]:
                 assert seq_idx is None, "varlen conv1d requires the causal_conv1d package"
-                xBC = self.act(
-                    self.conv1d(xBC.transpose(1, 2)).transpose(1, 2)[:, :-(self.d_conv - 1)]
-                )  # (B, L, self.d_ssm + 2 * ngroups * d_state)
+                xBC = self.conv1d(xBC.transpose(1, 2)).transpose(1, 2)
+                if self.d_conv > 1:
+                    xBC = xBC[:, :-(self.d_conv - 1)]
+                xBC = self.act(xBC)  # (B, L, self.d_ssm + 2 * ngroups * d_state)
             else:
                 xBC = causal_conv1d_fn(
-                    xBC.transpose(1, 2),
+                    xBC.transpose(1, 2).contiguous(),
                     rearrange(self.conv1d.weight, "d 1 w -> d w"),
                     bias=self.conv1d.bias,
                     activation=self.activation,
@@ -287,7 +288,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         )
 
         # Conv step
-        if causal_conv1d_update is None:
+        if self.d_conv == 1 or causal_conv1d_update is None:
             conv_state.copy_(torch.roll(conv_state, shifts=-1, dims=-1))  # Update state (B D W)
             conv_state[:, :, -1] = xBC
             xBC = torch.sum(conv_state * rearrange(self.conv1d.weight, "d 1 w -> d w"), dim=-1)  # (B D)

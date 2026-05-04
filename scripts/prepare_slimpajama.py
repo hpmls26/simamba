@@ -125,6 +125,12 @@ def write_split(
                 token_ids.append(eos_id)
             if not token_ids:
                 continue
+            max_token_id = max(token_ids)
+            if max_token_id > np.iinfo(np.uint16).max:
+                raise ValueError(
+                    f"Tokenizer produced token id {max_token_id}, which does not fit in uint16. "
+                    "Use a tokenizer with <=65536 ids or extend the preparation/training dtype to int32."
+                )
 
             remaining = token_target - cursor
             if remaining <= 0:
@@ -259,6 +265,7 @@ def main():
         "seed": args.seed,
         "shuffle_buffer": args.shuffle_buffer,
         "eos_after_each_doc": args.eos_after_each_doc,
+        "token_dtype": "uint16",
         "allowed_sources": args.allowed_sources,
         "outputs": results,
     }
