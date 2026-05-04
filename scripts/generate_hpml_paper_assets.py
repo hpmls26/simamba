@@ -364,6 +364,28 @@ def plot_architecture() -> None:
     plt.close(fig)
 
 
+def plot_discretization_comparison() -> None:
+    paths = [
+        (ROOT / "docs" / "assets" / "eulers_discretization.png", "(a) Forward Euler", "left endpoint only", 145),
+        (ROOT / "docs" / "assets" / "trap_discretization.png", "(b) Trapezoid", "two endpoint average", 92),
+        (ROOT / "docs" / "assets" / "simpson_discretization.png", "(c) Simpson's 1/3 rule", "endpoint + midpoint curvature", 92),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(12.0, 3.65), dpi=220)
+    for ax, (path, title, subtitle, crop_top) in zip(axes, paths):
+        image = plt.imread(path)
+        # Remove the original title band so the paper has consistent labels and
+        # avoids carrying the typo in the provided Simpson source image.
+        cropped = image[crop_top:735, :, :]
+        ax.imshow(cropped)
+        ax.axis("off")
+        ax.set_title(title, fontsize=11, weight="bold", pad=4)
+        ax.text(0.5, -0.045, subtitle, transform=ax.transAxes, ha="center", va="top", fontsize=8.5)
+    fig.suptitle("Quadrature choices for one SSM input-forcing interval", y=0.99, fontsize=12.5, weight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.94), w_pad=0.35)
+    fig.savefig(OUT / "discretization_comparison.png", bbox_inches="tight")
+    plt.close(fig)
+
+
 def write_run_summary(df: pd.DataFrame) -> None:
     rows = []
     best = best_val_from_outputs().set_index("output_dir")
@@ -423,6 +445,7 @@ def main() -> None:
     plot_throughput(df)
     plot_compression()
     plot_architecture()
+    plot_discretization_comparison()
     copy_benchmark_plots()
     print(OUT)
 
