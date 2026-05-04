@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
+from PIL import Image, ImageDraw, ImageFont
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -386,6 +387,79 @@ def plot_discretization_comparison() -> None:
     plt.close(fig)
 
 
+def _trim_near_white(image: Image.Image, threshold: int = 248) -> Image.Image:
+    rgb = image.convert("RGB")
+    arr = np.asarray(rgb)
+    mask = np.any(arr < threshold, axis=2)
+    if not mask.any():
+        return rgb
+    ys, xs = np.where(mask)
+    pad = 24
+    left = max(0, xs.min() - pad)
+    right = min(rgb.width, xs.max() + pad)
+    top = max(0, ys.min() - pad)
+    bottom = min(rgb.height, ys.max() + pad)
+    return rgb.crop((left, top, right, bottom))
+
+
+def _fit_image(image: Image.Image, size: tuple[int, int]) -> Image.Image:
+    canvas_w, canvas_h = size
+    scale = min(canvas_w / image.width, canvas_h / image.height)
+    new_size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+    resized = image.resize(new_size, Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", size, "white")
+    x = (canvas_w - resized.width) // 2
+    y = (canvas_h - resized.height) // 2
+    canvas.paste(resized, (x, y))
+    return canvas
+
+
+def plot_mamba_family_architecture_comparison() -> None:
+    mamba23 = Image.open(ROOT / "assets" / "mamba3.png").convert("RGB")
+    # The README image includes a large legend on the right. Crop to the
+    # Mamba-2/Mamba-3 block diagrams so the block comparison remains legible.
+    mamba23 = _trim_near_white(mamba23.crop((0, 0, 2100, mamba23.height)))
+    simamba = _trim_near_white(Image.open(ROOT / "docs" / "assets" / "simamba_architecture.png"))
+
+    panel_w, panel_h = 1500, 900
+    margin = 80
+    title_h = 110
+    caption_h = 70
+    gap = 50
+    canvas = Image.new("RGB", (2 * panel_w + gap + 2 * margin, panel_h + title_h + caption_h + 2 * margin), "white")
+    draw = ImageDraw.Draw(canvas)
+    try:
+        title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 46)
+        label_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 34)
+        note_font = ImageFont.truetype("DejaVuSans.ttf", 27)
+    except OSError:
+        title_font = label_font = note_font = ImageFont.load_default()
+
+    title = "Mamba-family block diagrams"
+    bbox = draw.textbbox((0, 0), title, font=title_font)
+    draw.text(((canvas.width - (bbox[2] - bbox[0])) // 2, 26), title, fill="black", font=title_font)
+
+    left = _fit_image(mamba23, (panel_w, panel_h))
+    right = _fit_image(simamba, (panel_w, panel_h))
+    x0 = margin
+    x1 = margin + panel_w + gap
+    y0 = margin + title_h
+    canvas.paste(left, (x0, y0))
+    canvas.paste(right, (x1, y0))
+
+    labels = [
+        ("Mamba-2 and Mamba-3 reference blocks", x0, "README: assets/mamba3.png"),
+        ("Simamba block", x1, "docs/assets/simamba_architecture.png"),
+    ]
+    for label, x, note in labels:
+        bbox = draw.textbbox((0, 0), label, font=label_font)
+        draw.text((x + (panel_w - (bbox[2] - bbox[0])) // 2, y0 + panel_h + 10), label, fill="black", font=label_font)
+        bbox = draw.textbbox((0, 0), note, font=note_font)
+        draw.text((x + (panel_w - (bbox[2] - bbox[0])) // 2, y0 + panel_h + 52), note, fill="#374151", font=note_font)
+
+    canvas.save(OUT / "mamba_family_architecture_comparison.png")
+
+
 def write_run_summary(df: pd.DataFrame) -> None:
     rows = []
     best = best_val_from_outputs().set_index("output_dir")
@@ -446,6 +520,7 @@ def main() -> None:
     plot_compression()
     plot_architecture()
     plot_discretization_comparison()
+    plot_mamba_family_architecture_comparison()
     copy_benchmark_plots()
     print(OUT)
 

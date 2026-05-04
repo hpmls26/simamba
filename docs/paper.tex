@@ -93,12 +93,12 @@ However, this benefit is not guaranteed in a learned language model. Inputs are 
 
 \subsection{Architecture}
 
-Fig.~\ref{fig:arch} summarizes the implemented block. The language model is the repository's MambaLMHeadModel: token IDs are embedded, each residual block applies add+RMSNorm, the selected mixer runs, and the final hidden states use a tied LM head. The \modelname mixer projects each hidden state $u_t$ into $z_t$, $x_t$, $B_t$, $C_t$, $\Delta_t$, $A_t$, a learned discretization coefficient, optional midpoint coefficient, and rotary angle parameters. It then normalizes $B_t$ and $C_t$, applies the SISO recurrence, applies the $D$ skip and optional $z$ gate/output norm, and returns to the model dimension.
+Fig.~\ref{fig:arch} places the implemented \modelname block beside the Mamba--2 and Mamba--3 reference block diagrams from the repository README. The language model is the repository's MambaLMHeadModel: token IDs are embedded, each residual block applies add+RMSNorm, the selected mixer runs, and the final hidden states use a tied LM head. The \modelname mixer keeps the Mamba--3-style projection, convolution/RoPE path, output projection, skip, and nonlinear gating structure, but replaces the internal SSM transform with the Simpson SSM recurrence. It projects each hidden state $u_t$ into $z_t$, $x_t$, $B_t$, $C_t$, $\Delta_t$, $A_t$, a learned discretization coefficient, optional midpoint coefficient, and rotary angle parameters. It then normalizes $B_t$ and $C_t$, applies the SISO recurrence, applies the $D$ skip and optional $z$ gate/output norm, and returns to the model dimension.
 
 \begin{figure*}[t]
     \centering
-    \includegraphics[width=0.94\textwidth]{simamba_architecture.png}
-    \caption{\modelname{} architecture. The matched trapezoid baseline uses the same projections, biases, rotary state, $D$ skip, and output path; only the SISO state-update coefficients change. Optional $d_{\mathrm{conv}}=4$ local mixing was added to match the \mambatwo{} $x/B/C$ causal convolution confound.}
+    \includegraphics[width=0.98\textwidth]{mamba_family_architecture_comparison.png}
+    \caption{Architecture comparison using the README Mamba--2/Mamba--3 block diagram and the added \modelname block diagram. \modelname preserves the Mamba--3-style block skeleton but changes the sequence transformation to a Simpson SSM. The matched trapezoid baseline uses the same projections, biases, rotary state, $D$ skip, and output path; only the SISO state-update coefficients change.}
     \label{fig:arch}
 \end{figure*}
 
