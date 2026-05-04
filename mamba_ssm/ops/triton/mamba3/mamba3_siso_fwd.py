@@ -432,7 +432,10 @@ def mamba3_siso_fwd_kernel(
 def _alloc_fn(size: int, alignment: int, stream: Optional[int]):
     """Custom allocator for TMA descriptor global memory allocation."""
     return torch.empty(size, device="cuda", dtype=torch.int8)
-triton.set_allocator(_alloc_fn)
+try:
+    triton.set_allocator(_alloc_fn)
+except AttributeError:
+    pass
 
 def mamba3_siso_fwd(
     Q: torch.Tensor,
@@ -579,7 +582,7 @@ def mamba3_siso_fwd(
     # Allocate output tensors
     Out = torch.empty((batch, seqlen, nheads, headdim_v), device=device, dtype=V.dtype)
     if store_states_adt_outv:
-        SSM_States = torch.zeros((batch, nheads, headdim_v, nchunks * headdim_qk), device=device, dtype=torch.bfloat16)
+        SSM_States = torch.zeros((batch, nheads, headdim_v, nchunks * headdim_qk), device=device, dtype=torch.float32)
         DA_CS_Store = torch.empty((batch, nheads, seqlen), device=device, dtype=torch.float32)
         DA_CS_SUM_Store = torch.zeros((batch, nheads, nchunks), device=device, dtype=torch.float32)
         Out_v = torch.empty((batch, seqlen, nheads, headdim_v), device=device, dtype=V.dtype)

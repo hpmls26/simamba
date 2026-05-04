@@ -170,7 +170,7 @@ class Mamba2Simple(nn.Module):
                 xBC = xBC[:, :seqlen, :]
             else:
                 xBC = causal_conv1d_fn(
-                    x=xBC.transpose(1, 2),
+                    x=xBC.transpose(1, 2).contiguous(),
                     weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
                     bias=self.conv1d.bias,
                     activation=self.activation,

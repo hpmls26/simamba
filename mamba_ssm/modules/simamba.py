@@ -14,6 +14,7 @@ from mamba_ssm.ops.triton.simamba.simamba_siso_combined import (
     SIMAMBA_SUPPORTED_BOUNDARY_MODES,
     simamba_siso_combined,
     simamba_siso_step,
+    simamba_trapezoid_siso_combined,
 )
 from mamba_ssm.ops.triton.simamba.mamba3_siso_combined import (
     mamba3_siso_combined as simamba_triton_siso_combined,
@@ -24,6 +25,12 @@ from mamba_ssm.ops.triton.simamba.mamba3_siso_step import mamba3_siso_step as si
 SIMAMBA_BACKEND_REFERENCE = "reference"
 SIMAMBA_BACKEND_TRITON = "triton"
 SIMAMBA_SUPPORTED_BACKENDS = (SIMAMBA_BACKEND_REFERENCE, SIMAMBA_BACKEND_TRITON)
+SIMAMBA_DISCRETIZATION_SIMPSON = "simpson"
+SIMAMBA_DISCRETIZATION_TRAPEZOID = "trapezoid"
+SIMAMBA_SUPPORTED_DISCRETIZATIONS = (
+    SIMAMBA_DISCRETIZATION_SIMPSON,
+    SIMAMBA_DISCRETIZATION_TRAPEZOID,
+)
 
 
 class Simamba(nn.Module):
@@ -41,12 +48,18 @@ class Simamba(nn.Module):
         dt_limit=(0.001, 0.1),
         A_floor=1e-4,
         A_max=16.0,
+        d_conv=0,
+        conv_bias=True,
+        conv_init=None,
         is_outproj_norm=False,
         is_mimo=False,
         mimo_rank=4,
         chunk_size=64,
         recompute_chunk_size=None,
         use_midpoint_control=False,
+        control_logit_offset=0.0,
+        midpoint_logit_offset=0.0,
+        discretization=SIMAMBA_DISCRETIZATION_SIMPSON,
         simamba_backend=SIMAMBA_BACKEND_REFERENCE,
         simpson_boundary_mode=SIMAMBA_BOUNDARY_MODE_ZERO_PAD,
         dropout=0.0,
@@ -73,10 +86,23 @@ class Simamba(nn.Module):
         self.layer_idx = layer_idx
         self.A_floor = A_floor
         self.A_max = float(A_max)
+        self.d_conv = int(d_conv)
+        if self.d_conv < 0:
+            raise ValueError(f"d_conv must be non-negative, got {d_conv!r}.")
         self.is_outproj_norm = is_outproj_norm
         self.is_mimo = False
         self.mimo_rank = 1
         self.use_midpoint_control = use_midpoint_control
+        self.control_logit_offset = float(control_logit_offset)
+        self.midpoint_logit_offset = float(midpoint_logit_offset)
+        if discretization not in SIMAMBA_SUPPORTED_DISCRETIZATIONS:
+            raise ValueError(
+                f"Unsupported discretization={discretization!r}. "
+                f"Expected one of {SIMAMBA_SUPPORTED_DISCRETIZATIONS}."
+            )
+        if discretization == SIMAMBA_DISCRETIZATION_TRAPEZOID and self.use_midpoint_control:
+            raise ValueError("Trapezoid baseline does not use midpoint control.")
+        self.discretization = discretization
         if len(dt_limit) != 2:
             raise ValueError(f"dt_limit must be a (min, max) pair, got {dt_limit!r}.")
         dt_limit_min, dt_limit_max = float(dt_limit[0]), float(dt_limit[1])
@@ -117,7 +143,7 @@ class Simamba(nn.Module):
         self.num_rope_angles = self.split_tensor_size // 2
         assert self.num_rope_angles > 0
 
-        # Order: [z, x, B, C, dd_dt, dd_A, simpson, (optional midpoint), angle]
+        # Order: [z, x, B, C, dd_dt, dd_A, coefficient, (optional midpoint), angle]
         num_head_controls = 4 if self.use_midpoint_control else 3
         d_in_proj = (
             2 * self.d_inner
@@ -126,6 +152,23 @@ class Simamba(nn.Module):
             + self.num_rope_angles
         )
         self.in_proj = nn.Linear(self.d_model, d_in_proj, bias=False, **factory_kwargs)
+        if self.d_conv > 0:
+            conv_dim = self.d_inner + 2 * self.d_state * self.num_bc_heads
+            self.conv1d = nn.Conv1d(
+                in_channels=conv_dim,
+                out_channels=conv_dim,
+                bias=conv_bias,
+                kernel_size=self.d_conv,
+                groups=conv_dim,
+                padding=self.d_conv - 1,
+                **factory_kwargs,
+            )
+            if conv_init is not None:
+                nn.init.uniform_(self.conv1d.weight, -conv_init, conv_init)
+            self.act = nn.SiLU()
+        else:
+            self.conv1d = None
+            self.act = nn.Identity()
 
         _dt = torch.exp(
             torch.rand(self.nheads, device=device, dtype=torch.float32)
@@ -181,6 +224,8 @@ class Simamba(nn.Module):
             raise NotImplementedError("Simamba does not support cu_seqlens / variable-length mode.")
         if u.dim() != 3:
             raise ValueError(f"Expected input shape (batch, seqlen, d_model), got {u.shape}.")
+        if inference_params is not None and self.d_conv > 0:
+            raise NotImplementedError("Incremental decoding is not implemented for Simamba local convolution.")
 
         batch, seqlen, _ = u.shape
 
@@ -201,6 +246,8 @@ class Simamba(nn.Module):
                 v_prev2_state,
             ) = self._get_states_from_cache(inference_params, batch)
             if inference_params.seqlen_offset > 0:
+                if self.discretization == SIMAMBA_DISCRETIZATION_TRAPEZOID:
+                    raise NotImplementedError("Incremental decoding is not implemented for the trapezoid baseline.")
                 if seqlen != 1:
                     raise ValueError(
                         "Incremental decoding path expects seqlen=1 for forward(..., inference_params=...)."
@@ -237,12 +284,32 @@ class Simamba(nn.Module):
             z, x, B, C, dd_dt, dd_A, simpson, angles = splits
             midpoint = None
 
+        if self.conv1d is not None:
+            xBC = torch.cat([x, B, C], dim=-1)
+            xBC = self.conv1d(xBC.transpose(1, 2)).transpose(1, 2)
+            if self.d_conv > 1:
+                xBC = xBC[:, :-(self.d_conv - 1)]
+            xBC = self.act(xBC)
+            x, B, C = torch.split(
+                xBC,
+                [
+                    self.d_inner,
+                    self.d_state * self.num_bc_heads,
+                    self.d_state * self.num_bc_heads,
+                ],
+                dim=-1,
+            )
+
         z = rearrange(z, "b l (h p) -> b l h p", p=self.headdim)
         x = rearrange(x, "b l (h p) -> b l h p", p=self.headdim)
         B = rearrange(B, "b l (r g n) -> b l r g n", r=1, g=self.num_bc_heads)
         C = rearrange(C, "b l (r g n) -> b l r g n", r=1, g=self.num_bc_heads)
-        simpson = rearrange(torch.sigmoid(simpson), "b l h -> b h l")
-        midpoint = rearrange(torch.sigmoid(midpoint), "b l h -> b h l") if midpoint is not None else None
+        simpson = rearrange(torch.sigmoid(simpson + self.control_logit_offset), "b l h -> b h l")
+        midpoint = (
+            rearrange(torch.sigmoid(midpoint + self.midpoint_logit_offset), "b l h -> b h l")
+            if midpoint is not None
+            else None
+        )
 
         _A, DT = self._bounded_dynamics(dd_A, dd_dt)
         ADT = _A * DT
@@ -265,7 +332,37 @@ class Simamba(nn.Module):
                 v_prev2_state,
             )
 
-        if self.simamba_backend == SIMAMBA_BACKEND_REFERENCE:
+        if self.discretization == SIMAMBA_DISCRETIZATION_TRAPEZOID:
+            if self.simamba_backend != SIMAMBA_BACKEND_REFERENCE:
+                raise NotImplementedError(
+                    "The matched trapezoid Simamba baseline currently uses the reference backend. "
+                    "Set --simamba-backend reference for --simamba-discretization trapezoid."
+                )
+            y = simamba_trapezoid_siso_combined(
+                Q=C.squeeze(2),
+                K=B.squeeze(2),
+                V=x,
+                ADT=ADT,
+                DT=DT,
+                Trap=simpson,
+                Q_bias=self.C_bias.squeeze(1),
+                K_bias=self.B_bias.squeeze(1),
+                Angles=angles,
+                D=self.D,
+                Z=z if not self.is_outproj_norm else None,
+                Input_States=input_states,
+                return_final_states=input_states is not None,
+                cu_seqlens=cu_seqlens,
+            )
+            if ssm_state is not None:
+                y, last_angle, last_state, last_k1, last_k2, last_v1, last_v2 = y
+                angle_dt_state.copy_(last_angle)
+                ssm_state.copy_(last_state)
+                k_prev1_state.copy_(last_k1)
+                k_prev2_state.copy_(last_k2)
+                v_prev1_state.copy_(last_v1)
+                v_prev2_state.copy_(last_v2)
+        elif self.simamba_backend == SIMAMBA_BACKEND_REFERENCE:
             y = simamba_siso_combined(
                 Q=C.squeeze(2),
                 K=B.squeeze(2),
@@ -364,6 +461,9 @@ class Simamba(nn.Module):
         **kwargs,
     ):
         del kwargs
+
+        if self.d_conv > 0:
+            raise NotImplementedError("Incremental decoding is not implemented for Simamba local convolution.")
 
         if self.num_bc_heads != 1:
             raise NotImplementedError(
@@ -508,6 +608,9 @@ class Simamba(nn.Module):
 
     def allocate_inference_cache(self, batch_size, max_seqlen, device=None, dtype=None, inplace_state=None, **kwargs):
         del max_seqlen, inplace_state, kwargs
+
+        if self.d_conv > 0:
+            raise NotImplementedError("Inference cache is not implemented for Simamba local convolution.")
 
         device = self.in_proj.weight.device if device is None else device
         dtype = self.in_proj.weight.dtype if dtype is None else dtype

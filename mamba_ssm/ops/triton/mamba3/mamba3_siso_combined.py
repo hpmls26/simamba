@@ -30,6 +30,16 @@ except Exception:
     pass  # Allocator may already be set
 
 
+def _select_triton_value_dtype(tensor: Tensor) -> torch.dtype:
+    if tensor.dtype == torch.bfloat16:
+        if tensor.is_cuda and torch.cuda.get_device_properties(tensor.device).major < 8:
+            return torch.float16
+        return torch.bfloat16
+    if tensor.dtype in (torch.float16, torch.float32):
+        return tensor.dtype
+    return torch.float32
+
+
 @dataclass(frozen=True)
 class Mamba3Output:
     """Container for Mamba-3 outputs and optional intermediates.
@@ -387,16 +397,17 @@ def mamba3_siso_combined(
     all_states_absent = (Input_SSM_State is None) and (Input_K_State is None) and (Input_V_State is None) and (Input_Angle_State is None)
     assert all_states_present or all_states_absent, "Input states must be provided together or all be None."
 
-    # Typecast all derived tensors to bf16.
+    # Typecast all derived tensors to a Triton-friendly activation dtype.
     # ADT, DT should be in fp32 for stability
     # Q_bias, K_bias, D should be in fp32 as they are model parameters
-    Q = Q.to(torch.bfloat16)
-    K = K.to(torch.bfloat16)
-    V = V.to(torch.bfloat16)
-    Trap = Trap.to(torch.bfloat16)
-    Angles = Angles.to(torch.bfloat16)
+    value_dtype = _select_triton_value_dtype(Q)
+    Q = Q.to(value_dtype)
+    K = K.to(value_dtype)
+    V = V.to(value_dtype)
+    Trap = Trap.to(value_dtype)
+    Angles = Angles.to(value_dtype)
     if Z is not None:
-        Z = Z.to(torch.bfloat16)
+        Z = Z.to(value_dtype)
 
     return _Mamba3Function.apply(
         Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, D, Z,
