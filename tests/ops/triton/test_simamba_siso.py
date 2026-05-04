@@ -3,6 +3,7 @@
 import sys
 import types
 from pathlib import Path
+from argparse import Namespace
 
 import pytest
 import torch
@@ -25,6 +26,54 @@ from mamba_ssm.ops.triton.simamba.mamba3_siso_combined import (
 from mamba_ssm.ops.triton.simamba.mamba3_siso_step import mamba3_siso_step
 from mamba_ssm.modules.simamba import Simamba
 from mamba_ssm.ops.triton.simamba.simamba_siso_combined import simamba_siso_combined
+from scripts.train_simamba_lm import simamba_correction_scale_for_step
+
+
+def test_simamba_correction_scale_schedule():
+    args = Namespace(
+        model_layer="Simamba",
+        simamba_discretization="simpson",
+        simamba_correction_anneal_min=0.0,
+        simamba_correction_anneal_max=1.0,
+        simamba_correction_anneal_start=10,
+        simamba_correction_anneal_steps=100,
+        simamba_correction_anneal_schedule="linear",
+    )
+
+    assert simamba_correction_scale_for_step(0, args) == 0.0
+    assert simamba_correction_scale_for_step(10, args) == 0.0
+    assert simamba_correction_scale_for_step(60, args) == 0.5
+    assert simamba_correction_scale_for_step(110, args) == 1.0
+    assert simamba_correction_scale_for_step(1000, args) == 1.0
+
+    args.simamba_correction_anneal_schedule = "cosine"
+    assert simamba_correction_scale_for_step(60, args) == pytest.approx(0.5)
+
+    args.model_layer = "Mamba2"
+    assert simamba_correction_scale_for_step(60, args) == 1.0
+
+
+def test_simamba_module_scales_and_clamps_simpson_correction():
+    model = Simamba(
+        d_model=64,
+        d_state=16,
+        expand=2,
+        headdim=16,
+        simamba_backend="reference",
+        device="cpu",
+        dtype=torch.float32,
+    )
+    simpson = torch.ones(2, 3, dtype=torch.float32)
+
+    assert torch.allclose(model._scale_simpson_correction(simpson), simpson)
+
+    model.set_simpson_correction_scale(0.25)
+    assert model.get_simpson_correction_scale() == pytest.approx(0.25)
+    assert torch.allclose(model._scale_simpson_correction(simpson), simpson * 0.25)
+
+    model.set_simpson_correction_scale(-4.0)
+    assert model.get_simpson_correction_scale() == 0.0
+    assert torch.count_nonzero(model._scale_simpson_correction(simpson)) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

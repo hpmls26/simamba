@@ -59,6 +59,7 @@ class Simamba(nn.Module):
         use_midpoint_control=False,
         control_logit_offset=0.0,
         midpoint_logit_offset=0.0,
+        simpson_correction_scale=1.0,
         discretization=SIMAMBA_DISCRETIZATION_SIMPSON,
         simamba_backend=SIMAMBA_BACKEND_REFERENCE,
         simpson_boundary_mode=SIMAMBA_BOUNDARY_MODE_ZERO_PAD,
@@ -95,6 +96,18 @@ class Simamba(nn.Module):
         self.use_midpoint_control = use_midpoint_control
         self.control_logit_offset = float(control_logit_offset)
         self.midpoint_logit_offset = float(midpoint_logit_offset)
+        simpson_correction_scale = float(simpson_correction_scale)
+        if not math.isfinite(simpson_correction_scale):
+            raise ValueError(f"simpson_correction_scale must be finite, got {simpson_correction_scale!r}.")
+        if simpson_correction_scale < 0.0 or simpson_correction_scale > 1.0:
+            raise ValueError(
+                f"simpson_correction_scale must be in [0, 1], got {simpson_correction_scale!r}."
+            )
+        self.register_buffer(
+            "simpson_correction_scale",
+            torch.tensor(simpson_correction_scale, dtype=torch.float32, device=device),
+            persistent=False,
+        )
         if discretization not in SIMAMBA_SUPPORTED_DISCRETIZATIONS:
             raise ValueError(
                 f"Unsupported discretization={discretization!r}. "
@@ -218,6 +231,22 @@ class Simamba(nn.Module):
             DT = DT.clamp(min=self.dt_limit[0], max=self.dt_limit[1])
         return _A, DT
 
+    @torch.no_grad()
+    def set_simpson_correction_scale(self, scale: float) -> None:
+        scale = float(scale)
+        if not math.isfinite(scale):
+            raise ValueError(f"Simpson correction scale must be finite, got {scale!r}.")
+        self.simpson_correction_scale.fill_(max(0.0, min(1.0, scale)))
+
+    def get_simpson_correction_scale(self) -> float:
+        return float(self.simpson_correction_scale.detach().cpu().item())
+
+    def _scale_simpson_correction(self, simpson: torch.Tensor) -> torch.Tensor:
+        if self.discretization != SIMAMBA_DISCRETIZATION_SIMPSON:
+            return simpson
+        scale = self.simpson_correction_scale.to(device=simpson.device, dtype=torch.float32)
+        return simpson * scale
+
     def forward(self, u, seq_idx=None, cu_seqlens=None, inference_params=None):
         del seq_idx
         if cu_seqlens is not None:
@@ -305,6 +334,7 @@ class Simamba(nn.Module):
         B = rearrange(B, "b l (r g n) -> b l r g n", r=1, g=self.num_bc_heads)
         C = rearrange(C, "b l (r g n) -> b l r g n", r=1, g=self.num_bc_heads)
         simpson = rearrange(torch.sigmoid(simpson + self.control_logit_offset), "b l h -> b h l")
+        simpson = self._scale_simpson_correction(simpson)
         midpoint = (
             rearrange(torch.sigmoid(midpoint + self.midpoint_logit_offset), "b l h -> b h l")
             if midpoint is not None
@@ -430,8 +460,9 @@ class Simamba(nn.Module):
 
     def _preprocess(self, A_proj, dd_dt, B, C, x, z, simpson_proj, angle_proj, midpoint_proj=None):
         _A, DT = self._bounded_dynamics(A_proj, dd_dt)
-        simpson = torch.sigmoid(simpson_proj)
-        midpoint = torch.sigmoid(midpoint_proj) if midpoint_proj is not None else None
+        simpson = torch.sigmoid(simpson_proj + self.control_logit_offset)
+        simpson = self._scale_simpson_correction(simpson)
+        midpoint = torch.sigmoid(midpoint_proj + self.midpoint_logit_offset) if midpoint_proj is not None else None
 
         B = rearrange(B, "b (r g s) -> b r g s", g=self.num_bc_heads, r=1)
         C = rearrange(C, "b (r g s) -> b r g s", g=self.num_bc_heads, r=1)

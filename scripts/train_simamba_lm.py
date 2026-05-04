@@ -154,6 +154,39 @@ def parse_args():
             "control projection."
         ),
     )
+    parser.add_argument(
+        "--simamba-correction-anneal-min",
+        type=float,
+        default=1.0,
+        help=(
+            "Initial lower bound for the effective Simpson correction scale. "
+            "Use 0.0 to remove the negative lag-2 correction at the start of training."
+        ),
+    )
+    parser.add_argument(
+        "--simamba-correction-anneal-max",
+        type=float,
+        default=1.0,
+        help="Final effective Simpson correction scale after annealing.",
+    )
+    parser.add_argument(
+        "--simamba-correction-anneal-start",
+        type=int,
+        default=0,
+        help="Optimizer step at which to begin ramping the Simpson correction scale.",
+    )
+    parser.add_argument(
+        "--simamba-correction-anneal-steps",
+        type=int,
+        default=0,
+        help="Number of optimizer steps used to ramp the Simpson correction scale from min to max.",
+    )
+    parser.add_argument(
+        "--simamba-correction-anneal-schedule",
+        choices=["linear", "cosine"],
+        default="linear",
+        help="Schedule shape for --simamba-correction-anneal-steps.",
+    )
     parser.add_argument("--simamba-discretization", choices=["simpson", "trapezoid"], default="simpson")
     parser.add_argument("--simamba-backend", choices=["reference", "triton"], default="triton")
     parser.add_argument("--simamba-outproj-norm", action="store_true")
@@ -428,6 +461,76 @@ class FixedValidationSampler:
         return self.dataset.batch_from_starts(self.starts[int(eval_iter)], self.seq_len, self.device)
 
 
+def validate_simamba_correction_anneal_args(args):
+    min_scale = float(args.simamba_correction_anneal_min)
+    max_scale = float(args.simamba_correction_anneal_max)
+    if not math.isfinite(min_scale) or not math.isfinite(max_scale):
+        raise ValueError("Simamba correction anneal scales must be finite.")
+    if min_scale < 0.0 or max_scale > 1.0 or min_scale > max_scale:
+        raise ValueError(
+            "Expected 0 <= --simamba-correction-anneal-min <= "
+            "--simamba-correction-anneal-max <= 1."
+        )
+    if args.simamba_correction_anneal_start < 0:
+        raise ValueError("--simamba-correction-anneal-start must be non-negative.")
+    if args.simamba_correction_anneal_steps < 0:
+        raise ValueError("--simamba-correction-anneal-steps must be non-negative.")
+
+
+def simamba_correction_scale_for_step(step: int, args) -> float:
+    if args.model_layer != "Simamba" or args.simamba_discretization != "simpson":
+        return 1.0
+    min_scale = float(args.simamba_correction_anneal_min)
+    max_scale = float(args.simamba_correction_anneal_max)
+    anneal_steps = int(args.simamba_correction_anneal_steps)
+    start = int(args.simamba_correction_anneal_start)
+    if anneal_steps <= 0:
+        return max_scale
+    if step <= start:
+        progress = 0.0
+    else:
+        progress = min(1.0, (float(step) - float(start)) / float(anneal_steps))
+    if args.simamba_correction_anneal_schedule == "cosine":
+        progress = 0.5 * (1.0 - math.cos(math.pi * progress))
+    return min_scale + (max_scale - min_scale) * progress
+
+
+def _raw_model_for_helpers(model):
+    raw_model = model.module if isinstance(model, DDP) else model
+    return getattr(raw_model, "_orig_mod", raw_model)
+
+
+def set_simamba_correction_scale(model, scale: float) -> int:
+    updated = 0
+    for module in _raw_model_for_helpers(model).modules():
+        setter = getattr(module, "set_simpson_correction_scale", None)
+        if setter is not None:
+            setter(scale)
+            updated += 1
+    return updated
+
+
+def get_simamba_correction_scale(model) -> Optional[float]:
+    for module in _raw_model_for_helpers(model).modules():
+        getter = getattr(module, "get_simpson_correction_scale", None)
+        if getter is not None:
+            return float(getter())
+    return None
+
+
+def sync_simamba_correction_scale_to_config(model) -> None:
+    raw_model = _raw_model_for_helpers(model)
+    config = getattr(raw_model, "config", None)
+    if config is None:
+        return
+    ssm_cfg = getattr(config, "ssm_cfg", None)
+    if not isinstance(ssm_cfg, dict) or ssm_cfg.get("layer") != "Simamba":
+        return
+    scale = get_simamba_correction_scale(model)
+    if scale is not None:
+        ssm_cfg["simpson_correction_scale"] = scale
+
+
 def make_config(args):
     if args.model_layer == "Simamba":
         ssm_cfg = {
@@ -444,6 +547,7 @@ def make_config(args):
             "use_midpoint_control": args.simamba_use_midpoint_control,
             "control_logit_offset": args.simamba_control_logit_offset,
             "midpoint_logit_offset": args.simamba_midpoint_logit_offset,
+            "simpson_correction_scale": simamba_correction_scale_for_step(0, args),
             "discretization": args.simamba_discretization,
             "simamba_backend": args.simamba_backend,
             "is_outproj_norm": args.simamba_outproj_norm,
@@ -760,6 +864,7 @@ def save_training_snapshot(
     if checkpoint_dir.exists():
         shutil.rmtree(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    sync_simamba_correction_scale_to_config(model)
     save_checkpoint(
         checkpoint_dir / "trainer.pt",
         model,
@@ -786,6 +891,7 @@ def save_training_snapshot(
 def main():
     process_start = time.perf_counter()
     args = parse_args()
+    validate_simamba_correction_anneal_args(args)
     if args.model_layer == "Simamba" and args.simamba_discretization == "trapezoid":
         if args.simamba_backend != "reference":
             raise ValueError(
@@ -843,6 +949,11 @@ def main():
             chunk_size=args.simamba_chunk_size,
             discretization=args.simamba_discretization,
             backend=args.simamba_backend,
+            correction_anneal_min=args.simamba_correction_anneal_min,
+            correction_anneal_max=args.simamba_correction_anneal_max,
+            correction_anneal_start=args.simamba_correction_anneal_start,
+            correction_anneal_steps=args.simamba_correction_anneal_steps,
+            correction_anneal_schedule=args.simamba_correction_anneal_schedule,
             fp16_stability_product=simamba_fp16_stability_product,
         )
         if (
@@ -948,6 +1059,18 @@ def main():
             rank=rank,
             duration_sec=round(time.perf_counter() - phase_start, 3),
             find_unused_parameters=args.ddp_find_unused_parameters,
+        )
+
+    simamba_layer_count = 0
+    initial_simamba_correction_scale = simamba_correction_scale_for_step(start_step, args)
+    if args.model_layer == "Simamba":
+        simamba_layer_count = set_simamba_correction_scale(model, initial_simamba_correction_scale)
+        emit_status(
+            "runtime.simamba_correction_scale_ready",
+            rank=rank,
+            start_step=start_step,
+            scale=initial_simamba_correction_scale,
+            layer_count=simamba_layer_count,
         )
 
     args.eval_seed = args.eval_seed if args.eval_seed is not None else args.seed + 100000
@@ -1085,6 +1208,9 @@ def main():
             step_start = time.perf_counter()
             emit_status("train.first_step.begin", rank=rank, step=step)
         lr = lr_for_step(step, args)
+        simamba_correction_scale = simamba_correction_scale_for_step(step, args)
+        if simamba_layer_count > 0:
+            set_simamba_correction_scale(model, simamba_correction_scale)
         for group in optimizer.param_groups:
             group["lr"] = lr
 
@@ -1282,6 +1408,8 @@ def main():
                 "train/grad_clip_coef": float(grad_clip_coef.item()),
                 "train/tokens_per_sec": tokens_per_sec,
             }
+            if simamba_layer_count > 0:
+                metrics["train/simpson_correction_scale"] = simamba_correction_scale
             if train_sampler is not None:
                 metrics["train/sampler_epoch"] = int(train_sampler.epoch)
                 metrics["train/sampler_epoch_progress"] = float(train_sampler.epoch_progress)
