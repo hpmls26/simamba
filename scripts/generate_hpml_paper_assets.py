@@ -15,6 +15,11 @@ import pandas as pd
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    import seaborn as sns
+except ImportError:  # pragma: no cover - seaborn is cosmetic, not required.
+    sns = None
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_LOGS = ROOT / "run_logs"
@@ -56,6 +61,42 @@ LOCAL_MIX = [
     "outputs/disc10m_simamba_localconv_simpson_lowctrl_50m_20260504_localconv_dconv4_50m",
     "outputs/disc10m_simamba_localconv_simpson_50m_20260504_localconv_dconv4_50m",
 ]
+UNSTABLE_RUN = "outputs/simamba_2day_50m_seq128_100m_lr1e4_20260502_025645"
+APPENDIX_RUNS = MAIN_500M + ABLATION_50M + LOCAL_MIX + [UNSTABLE_RUN]
+
+RUN_GROUPS = {
+    "outputs/disc10m_mamba2_fp32_500m_20260502_185217": "Main 500M-token comparison",
+    "outputs/disc10m_simamba_fp32_500m_20260502_190333": "Main 500M-token comparison",
+    "outputs/disc10m_simamba_midpoint_fp32_500m_20260502_190333": "Main 500M-token comparison",
+    "outputs/disc10m_simamba_trapezoid_vec_500m_20260503_0609_trap_vec": "Main 500M-token comparison",
+    "outputs/disc10m_ablate_trapezoid_vec_50m_20260503_followup_50m": "Matched 50M-token discretization ablation",
+    "outputs/disc10m_ablate_simpson_default_50m_20260503_followup_50m": "Matched 50M-token discretization ablation",
+    "outputs/disc10m_ablate_simpson_lowctrl_50m_20260503_followup_50m": "Matched 50M-token discretization ablation",
+    "outputs/disc10m_ablate_mamba2_dconv2_50m_20260503_dconv2_50m": "Local-mixing control",
+    "outputs/disc10m_ablate_mamba2_dconv1_nomem_50m_20260504": "Local-mixing control",
+    "outputs/disc10m_simamba_localconv_trapezoid_50m_20260504_localconv_dconv4_50m": "Local-mixing control",
+    "outputs/disc10m_simamba_localconv_simpson_lowctrl_50m_20260504_localconv_dconv4_50m": "Local-mixing control",
+    "outputs/disc10m_simamba_localconv_simpson_50m_20260504_localconv_dconv4_50m": "Local-mixing control",
+    UNSTABLE_RUN: "Initial instability diagnosis",
+}
+
+RUN_CHART_METRICS = [
+    ("train/loss", "Training loss", "loss", True),
+    ("val/loss", "Fixed validation loss", "loss", False),
+    ("train/grad_norm_pre_clip", "Pre-clip gradient norm", "gradient norm", True),
+    ("train/tokens_per_sec", "Training throughput", "tokens/s", True),
+    ("train/lr", "Learning-rate schedule", "learning rate", False),
+]
+
+BAR_PALETTE = {
+    "mamba2": "#4C78A8",
+    "simamba": "#72B7B2",
+    "trapezoid": "#F58518",
+    "low_control": "#54A24B",
+    "compression_a": "#4C78A8",
+    "compression_b": "#F58518",
+    "compression_c": "#72B7B2",
+}
 
 
 def parse_run_logs() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -132,6 +173,40 @@ def ema(values: np.ndarray, alpha: float = 0.08) -> np.ndarray:
     for i in range(1, len(values)):
         out[i] = alpha * values[i] + (1.0 - alpha) * out[i - 1]
     return out
+
+
+def slugify(text: str) -> str:
+    safe = []
+    for ch in text.lower():
+        if ch.isalnum():
+            safe.append(ch)
+        elif safe and safe[-1] != "_":
+            safe.append("_")
+    return "".join(safe).strip("_")
+
+
+def color_for_run(label: str) -> str:
+    lower = label.lower()
+    if "mamba2" in lower:
+        return BAR_PALETTE["mamba2"]
+    if "trapezoid" in lower:
+        return BAR_PALETTE["trapezoid"]
+    if "low-control" in lower:
+        return BAR_PALETTE["low_control"]
+    return BAR_PALETTE["simamba"]
+
+
+def clean_bar_axis(ax, axis: str = "x") -> None:
+    ax.grid(True, axis=axis, color="#e8edf3", linewidth=0.9)
+    ax.set_axisbelow(True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#cbd5e1")
+    ax.spines["bottom"].set_color("#cbd5e1")
+    ax.tick_params(colors="#334155", labelsize=7.6)
+    ax.title.set_color("#111827")
+    ax.xaxis.label.set_color("#334155")
+    ax.yaxis.label.set_color("#334155")
 
 
 def plot_lines(
@@ -223,15 +298,15 @@ def plot_best_val() -> None:
     order = [RUN_LABELS[r] for r in MAIN_500M + ABLATION_50M + LOCAL_MIX if r in RUN_LABELS]
     df["run"] = pd.Categorical(df["run"], categories=order, ordered=True)
     df = df.sort_values("run")
-    colors = ["#2563eb" if "Mamba2" in r else "#0891b2" if "Simamba" in r else "#f97316" for r in df["run"].astype(str)]
-    fig, ax = plt.subplots(figsize=(7.5, 4.5), dpi=180)
-    ax.barh(df["run"].astype(str), df["best_val"], color=colors)
+    colors = [color_for_run(r) for r in df["run"].astype(str)]
+    fig, ax = plt.subplots(figsize=(6.2, 3.8), dpi=200)
+    ax.barh(df["run"].astype(str), df["best_val"], color=colors, edgecolor="white", linewidth=0.8)
     ax.set_xlabel("Best fixed validation loss")
-    ax.set_title("Best validation loss across controlled runs", fontsize=11, weight="bold")
-    ax.grid(True, axis="x", color="#e5e7eb")
+    ax.set_title("Best validation loss across controlled runs", fontsize=10.5, weight="bold", pad=8)
+    clean_bar_axis(ax, "x")
     for i, val in enumerate(df["best_val"]):
-        ax.text(val + 0.01, i, f"{val:.3f}", va="center", fontsize=7.2)
-    ax.set_xlim(4.75, max(df["best_val"]) + 0.25)
+        ax.text(val + 0.008, i, f"{val:.3f}", va="center", fontsize=7.0, color="#334155")
+    ax.set_xlim(4.78, max(df["best_val"]) + 0.18)
     fig.tight_layout()
     fig.savefig(OUT / "summary_best_val_loss.png", bbox_inches="tight")
     plt.close(fig)
@@ -246,16 +321,125 @@ def plot_throughput(df: pd.DataFrame) -> None:
         vals = sub["train/tokens_per_sec"].tail(100).to_numpy(dtype=float)
         rows.append({"run": RUN_LABELS[run_dir], "tokens_per_sec": float(np.median(vals))})
     tdf = pd.DataFrame(rows)
-    fig, ax = plt.subplots(figsize=(7.4, 3.9), dpi=180)
-    ax.barh(tdf["run"], tdf["tokens_per_sec"], color="#0f766e")
+    colors = [color_for_run(r) for r in tdf["run"]]
+    fig, ax = plt.subplots(figsize=(6.0, 3.4), dpi=200)
+    ax.barh(tdf["run"], tdf["tokens_per_sec"], color=colors, edgecolor="white", linewidth=0.8)
     ax.set_xlabel("Median tail throughput (tokens/s)")
-    ax.set_title("Training throughput on Tesla V100", fontsize=11, weight="bold")
-    ax.grid(True, axis="x", color="#e5e7eb")
+    ax.set_title("Training throughput on Tesla V100", fontsize=10.5, weight="bold", pad=8)
+    clean_bar_axis(ax, "x")
     for i, val in enumerate(tdf["tokens_per_sec"]):
-        ax.text(val + 200, i, f"{val:,.0f}", va="center", fontsize=7.2)
+        ax.text(val + 160, i, f"{val:,.0f}", va="center", fontsize=7.0, color="#334155")
+    ax.set_xlim(0, max(tdf["tokens_per_sec"]) * 1.13)
     fig.tight_layout()
     fig.savefig(OUT / "wandb_training_throughput.png", bbox_inches="tight")
     plt.close(fig)
+
+
+def latex_escape(text: str) -> str:
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(replacements.get(ch, ch) for ch in text)
+
+
+def plot_appendix_run_charts(df: pd.DataFrame) -> None:
+    chart_dir = OUT / "run_charts"
+    chart_dir.mkdir(parents=True, exist_ok=True)
+    for old in chart_dir.glob("*.png"):
+        old.unlink()
+
+    entries = []
+    for run_dir in APPENDIX_RUNS:
+        sub = df[df["output_dir"] == run_dir].sort_values("step")
+        if sub.empty:
+            continue
+
+        label = RUN_LABELS.get(run_dir, Path(run_dir).name)
+        group = RUN_GROUPS.get(run_dir, "Reported run")
+        slug = slugify(f"{group}_{label}")
+        fig, axes = plt.subplots(2, 3, figsize=(8.8, 4.9), dpi=200)
+        axes = axes.flatten()
+
+        for ax, (metric, title, ylabel, smooth) in zip(axes, RUN_CHART_METRICS):
+            if metric not in sub.columns:
+                ax.axis("off")
+                ax.text(0.5, 0.5, f"{title}\nnot logged", ha="center", va="center", fontsize=8)
+                continue
+            msub = sub[sub[metric].notna()][["step", metric]].copy()
+            if msub.empty:
+                ax.axis("off")
+                ax.text(0.5, 0.5, f"{title}\nnot logged", ha="center", va="center", fontsize=8)
+                continue
+            msub = msub.groupby("step", as_index=False).last().sort_values("step")
+            x = msub["step"].to_numpy(dtype=float) / 1000.0
+            y = msub[metric].to_numpy(dtype=float)
+            if smooth and len(y) > 4:
+                y = ema(y)
+            ax.plot(x, y, linewidth=1.5, color="#2563eb")
+            if metric == "val/loss" and len(y) > 0:
+                best_idx = int(np.nanargmin(y))
+                ax.scatter([x[best_idx]], [y[best_idx]], color="#dc2626", s=14, zorder=3)
+                ax.text(x[best_idx], y[best_idx], f" {y[best_idx]:.3f}", fontsize=6.8, va="bottom")
+            ax.set_title(title, fontsize=9, weight="bold")
+            ax.set_xlabel("step (thousands)", fontsize=8)
+            ax.set_ylabel(ylabel, fontsize=8)
+            ax.tick_params(labelsize=7)
+            ax.grid(True, color="#e5e7eb", linewidth=0.8)
+
+        for ax in axes[len(RUN_CHART_METRICS) :]:
+            ax.axis("off")
+            ax.text(
+                0.02,
+                0.92,
+                f"Output directory:\n{run_dir}",
+                ha="left",
+                va="top",
+                fontsize=7.2,
+                color="#374151",
+                wrap=True,
+            )
+
+        fig.suptitle(f"{group}: {label}", fontsize=12, weight="bold")
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
+        filename = f"{slug}.png"
+        fig.savefig(chart_dir / filename, bbox_inches="tight")
+        plt.close(fig)
+
+        group_phrase = group[:1].lower() + group[1:]
+        caption = (
+            f"Per-run chart for {label} in the {group_phrase}. "
+            "Panels show training loss, fixed validation loss, pre-clip gradient norm, "
+            "throughput, and learning-rate schedule when those metrics were logged."
+        )
+        entries.append(
+            {
+                "path": f"run_charts/{filename}",
+                "caption": caption,
+                "label": f"fig:run-chart-{slug.replace('_', '-')}",
+            }
+        )
+
+    tex_lines = [
+        "% Generated by scripts/generate_hpml_paper_assets.py.",
+        "% Regenerate after updating run logs or RUN_LABELS.",
+    ]
+    for entry in entries:
+        tex_lines.append(
+            "\\appendixrunfigure"
+            f"{{{entry['path']}}}"
+            f"{{{latex_escape(entry['caption'])}}}"
+            f"{{{entry['label']}}}"
+        )
+    (OUT / "per_run_charts.tex").write_text("\n".join(tex_lines) + "\n")
 
 
 def plot_compression() -> None:
@@ -274,18 +458,27 @@ def plot_compression() -> None:
         "prune_global_20": "20% prune",
         "prune_global_30": "30% prune",
     }
-    fig, ax = plt.subplots(figsize=(7.5, 4.0), dpi=180)
+    fig, ax = plt.subplots(figsize=(6.2, 3.5), dpi=200)
     x = np.arange(len(keep))
-    width = 0.24
+    width = 0.22
     checkpoints = ["mamba2_500m", "simamba_midpoint_500m", "simamba_trapezoid_500m"]
+    colors = [BAR_PALETTE["compression_a"], BAR_PALETTE["compression_b"], BAR_PALETTE["compression_c"]]
     for i, ckpt in enumerate(checkpoints):
         sub = df[df["checkpoint"] == ckpt].set_index("variant").loc[keep]
-        ax.bar(x + (i - 1) * width, sub["delta"], width=width, label=ckpt.replace("_", " "))
+        ax.bar(
+            x + (i - 1) * width,
+            sub["delta"],
+            width=width,
+            label=ckpt.replace("_", " "),
+            color=colors[i],
+            edgecolor="white",
+            linewidth=0.7,
+        )
     ax.set_xticks(x, [labels[k] for k in keep], rotation=15, ha="right")
     ax.set_ylabel("Validation loss delta")
-    ax.set_title("Post-training perturbation sensitivity", fontsize=11, weight="bold")
-    ax.grid(True, axis="y", color="#e5e7eb")
-    ax.legend(fontsize=7.2, frameon=False)
+    ax.set_title("Post-training perturbation sensitivity", fontsize=10.5, weight="bold", pad=8)
+    clean_bar_axis(ax, "y")
+    ax.legend(fontsize=7.0, frameon=False, ncol=1, loc="upper left")
     fig.tight_layout()
     fig.savefig(OUT / "compression_loss_delta.png", bbox_inches="tight")
     plt.close(fig)
@@ -495,6 +688,13 @@ def copy_benchmark_plots() -> None:
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
+    if sns is not None:
+        sns.set_theme(style="whitegrid", context="paper")
+    else:
+        try:
+            plt.style.use("seaborn-v0_8-whitegrid")
+        except Exception:
+            pass
     plt.rcParams.update(
         {
             "font.family": "DejaVu Sans",
@@ -517,6 +717,7 @@ def main() -> None:
     plot_instability(df, events)
     plot_best_val()
     plot_throughput(df)
+    plot_appendix_run_charts(df)
     plot_compression()
     plot_architecture()
     plot_discretization_comparison()
