@@ -16,6 +16,30 @@
 \newcommand{\mamba}{Mamba\xspace}
 \newcommand{\mambatwo}{Mamba--2\xspace}
 \newcommand{\mambathree}{Mamba--3\xspace}
+\newcommand{\appendixwidefigure}[3]{%
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.82\textwidth]{#1}
+    \caption{#2}
+    \label{#3}
+\end{figure*}
+}
+\newcommand{\appendixsmallfigure}[3]{%
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.68\textwidth]{#1}
+    \caption{#2}
+    \label{#3}
+\end{figure*}
+}
+\newcommand{\appendixrunfigure}[3]{%
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.82\textwidth]{#1}
+    \caption{#2}
+    \label{#3}
+\end{figure*}
+}
 
 \begin{document}
 
@@ -102,6 +126,36 @@ Fig.~\ref{fig:arch} places the implemented \modelname block beside the Mamba--2 
     \label{fig:arch}
 \end{figure*}
 
+\subsection{Training Model Shape and Dimensions}
+
+All controlled language-model experiments use the same small decoder-only \texttt{MambaLMHeadModel} shape unless a local-convolution control is explicitly named. The input batch is token IDs of shape $B\times L$, with $L=128$. During training, each micro-batch has $B=8$ and gradient accumulation gives an effective global batch of 64 sequences, or 8192 tokens per optimizer step. The embedding maps tokens to hidden states of shape $B\times L\times160$.
+
+The backbone has 8 residual mixer blocks, RMSNorm with fused add+norm, no attention layers, no MLP branch ($d_{\mathrm{intermediate}}=0$), residuals kept in fp32, and a tied language-model head over the 50,280-token GPT-NeoX vocabulary. For \modelname, each mixer expands from $d_{\mathrm{model}}=160$ to $d_{\mathrm{inner}}=320$. With head dimension 32, this gives 10 recurrent heads. Each head carries a SISO state of size $32\times64$, so the recurrent state tensor per layer has shape $B\times10\times32\times64$. The $B$ and $C$ streams each have state dimension 64 with one group, RoPE is applied to half of the state stream, and chunked training uses chunk size 16. The Simpson and trapezoid \modelname variants differ only in the recurrence coefficients and optional midpoint-control projection; the local-conv variants add a depthwise causal convolution of width 4 over the $x/B/C$ stream.
+
+\begin{table}[t]
+\caption{Training model shape used for the controlled language-model runs. Parameter counts include tied embeddings and the LM head.}
+\label{tab:model_shape}
+\centering
+\footnotesize
+\begin{tabular}{@{}lr@{}}
+\toprule
+Quantity & Value\\
+\midrule
+Vocabulary size & 50,280\\
+Sequence length & 128\\
+Layers & 8\\
+Hidden width $d_{\mathrm{model}}$ & 160\\
+Expansion / inner width & $2\times$ / 320\\
+Head dimension / heads & 32 / 10\\
+SSM state dimension & 64\\
+Per-layer recurrent state & $B\times10\times32\times64$\\
+Training micro/global batch & 8 / 64\\
+\modelname{} parameters & 9.51M--9.53M\\
+\mambatwo{} baseline parameters & 9.47M\\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{Matched Trapezoid Baseline}
 
 The comparison baseline is not stock \mambatwo. \mambatwo includes causal local convolution and a different parameterization, so it is not a pure discretization control. We implemented a matched \modelname trapezoid path with the same projection layout as \modelname. Let
@@ -146,7 +200,7 @@ H_t ={}& \alpha_t H_{t-1}
 \end{split}
 \label{eq:simpson}
 \end{equation}
-The negative lag-2 term $\gamma_{2,t}$ is the core difference. It is also the most likely source of the noisier gradient norms observed in Fig.~\ref{fig:main_grad}. We therefore added two controls: a coefficient logit offset to initialize $s_t$ closer to zero, and an optional midpoint control to reduce the effective correction.
+The negative lag-2 term $\gamma_{2,t}$ is the core difference. It is also the most likely source of the noisier gradient norms observed in Appendix Fig.~\ref{fig:app_main_grad}. We therefore added two controls: a coefficient logit offset to initialize $s_t$ closer to zero, and an optional midpoint control to reduce the effective correction.
 
 \section{Implementation}
 
@@ -217,14 +271,7 @@ All learning-curve figures in this section are exported from locally persisted W
 
 \subsection{Initial Instability}
 
-The first failure mode was exploding or nonfinite gradients before warmup completed. The loss appeared to plateau because clipping forced updates to a bounded norm, but gradient-health logs later showed nonfinite parameters/gradients. Fig.~\ref{fig:instability} shows the representative unstable run: the pre-clip gradient norm remains large while the learning rate is still tiny, and the job terminates at the first nonfinite detection.
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{wandb_initial_instability.png}
-    \caption{Initial unstable run. Gradient clipping held the post-clip update at 1.0, but the pre-clip norm stayed large and a nonfinite gradient was detected at step 159.}
-    \label{fig:instability}
-\end{figure}
+The first failure mode was exploding or nonfinite gradients before warmup completed. The loss appeared to plateau because clipping forced updates to a bounded norm, but gradient-health logs later showed nonfinite parameters/gradients. Appendix Fig.~\ref{fig:app_initial_instability} and the per-run chart in Fig.~\ref{fig:run-chart-initial-instability-diagnosis-unstable-fp16-lr-1e-4-run} show the representative unstable run: the pre-clip gradient norm remains large while the learning rate is still tiny, and the job terminates at the first nonfinite detection.
 
 The fixes were fp32 parameters, cosine decay after warmup, lower peak learning rates for larger runs, nonfinite skip/abort handling, and clearer W\&B/checkpoint resume metadata. These changes made the controlled fp32 runs complete with zero nonfinite skips.
 
@@ -249,32 +296,11 @@ Model & Best val. & Step & Last val. & Last train\\
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{wandb_main_500m_val_loss.png}
-    \caption{Fixed validation loss on the 500M-token comparison. \mambatwo continues improving through the second pass; Simpson variants begin to degrade on validation after their best checkpoints.}
-    \label{fig:main_val}
-\end{figure}
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{wandb_main_500m_train_loss.png}
-    \caption{Smoothed training loss for the 500M-token comparison. All models learn the training distribution, so the validation gap is not caused by a broken data path.}
-    \label{fig:main_train}
-\end{figure}
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{wandb_main_500m_grad_norm.png}
-    \caption{Smoothed pre-clip gradient norm. The Simpson variants show larger tail gradient norms than \mambatwo and the matched trapezoid run, consistent with harder optimization.}
-    \label{fig:main_grad}
-\end{figure}
-
-The validation curves in Fig.~\ref{fig:main_val} are the strongest evidence against the current Simpson formulation. \mambatwo is the best overall model, but it is not a pure discretization baseline. More importantly, the matched \modelname trapezoid baseline is competitive with and slightly better than default Simpson, while Simpson+midpoint has a better best checkpoint but worse final validation.
+The validation curves in Appendix Fig.~\ref{fig:app_main_val} are the strongest evidence against the current Simpson formulation. The corresponding per-run charts are Figs.~\ref{fig:run-chart-main-500m-token-comparison-mamba2}--\ref{fig:run-chart-main-500m-token-comparison-simamba-trapezoid}. \mambatwo is the best overall model, but it is not a pure discretization baseline. More importantly, the matched \modelname trapezoid baseline is competitive with and slightly better than default Simpson, while Simpson+midpoint has a better best checkpoint but worse final validation.
 
 \subsection{Matched 50M-Token Discretization Ablation}
 
-To reduce runtime and isolate the discretization, we ran a 50M-token matched ablation with identical model size, data, batch size, seed, and schedule. Table~\ref{tab:ablation50} and Fig.~\ref{fig:ablation50} show that lowering the initial Simpson correction helps, but not enough to beat trapezoid.
+To reduce runtime and isolate the discretization, we ran a 50M-token matched ablation with identical model size, data, batch size, seed, and schedule. Table~\ref{tab:ablation50} and Appendix Fig.~\ref{fig:app_ablation50} show that lowering the initial Simpson correction helps, but not enough to beat trapezoid. The individual run charts are Figs.~\ref{fig:run-chart-matched-50m-token-discretization-ablation-trapezoid}--\ref{fig:run-chart-matched-50m-token-discretization-ablation-simpson-low-control}.
 
 \begin{table}[t]
 \caption{50M-token matched discretization ablation.}
@@ -290,13 +316,6 @@ Simpson low-control & 5.8929 & 5.6995 & 0\\
 \bottomrule
 \end{tabular}
 \end{table}
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{wandb_50m_discretization_val_loss.png}
-    \caption{50M-token discretization ablation. The low-control initialization improves Simpson, but the matched trapezoid update remains ahead.}
-    \label{fig:ablation50}
-\end{figure}
 
 \subsection{Local-Convolution Confound}
 
@@ -319,41 +338,15 @@ Variant & Best/final val. & Last train\\
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{wandb_localmix_val_loss.png}
-    \caption{Local-mixing controls. Adding Mamba2-style local mixing narrows the gap for Simpson, but local-conv trapezoid is still better at this budget.}
-    \label{fig:localmix}
-\end{figure}
-
-This experiment is important because it prevents a misleading \mambatwo-vs-\modelname conclusion. Some of \mambatwo's advantage comes from local mixing, not only from its state discretization. After matching that mechanism, Simpson still trails the matched trapezoid update.
+The overlay in Appendix Fig.~\ref{fig:app_localmix} and the per-run charts in Figs.~\ref{fig:run-chart-local-mixing-control-mamba2-d-conv-2}--\ref{fig:run-chart-local-mixing-control-local-conv-simpson} show the same pattern. This experiment is important because it prevents a misleading \mambatwo-vs-\modelname conclusion. Some of \mambatwo's advantage comes from local mixing, not only from its state discretization. After matching that mechanism, Simpson still trails the matched trapezoid update.
 
 \subsection{Throughput and Kernel Benchmarking}
 
-Training throughput on the V100 is shown in Fig.~\ref{fig:throughput}. The non-local Simpson variants are slower than \mambatwo and trapezoid in the 500M runs, while the local-conv 50M runs are closer but still behind the fastest baselines.
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{wandb_training_throughput.png}
-    \caption{Median tail training throughput on the V100, computed from the last 100 logged W\&B points for each run.}
-    \label{fig:throughput}
-\end{figure}
+Training throughput on the V100 is summarized in Appendix Fig.~\ref{fig:app_throughput}. The non-local Simpson variants are slower than \mambatwo and trapezoid in the 500M runs, while the local-conv 50M runs are closer but still behind the fastest baselines.
 
 The repository SISO benchmark further separates prefill and decode. The current \modelname prefill path is much slower than the \mambathree fused kernel path: 776.9$\times$ slower in the B1/P128/G64 case and 410.7$\times$ slower in B4/P1024/G256. Decode-step latency is much closer, about 1.08$\times$ slower. Memory is comparable at decode and can be lower for \modelname prefill in the B4/P1024 case, but the latency gap dominates.
 
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{simamba_latency.png}
-    \caption{Repository SISO benchmark latency. \modelname decode overhead is small, but the prefill implementation is not competitive without fused-kernel work.}
-    \label{fig:bench_latency}
-\end{figure}
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{simamba_throughput.png}
-    \caption{Repository SISO benchmark throughput. The current prefill gap is a systems bottleneck independent of validation loss.}
-    \label{fig:bench_throughput}
-\end{figure}
+The benchmark plots are collected in Appendix Figs.~\ref{fig:app_bench_latency}--\ref{fig:app_bench_ratio}. The current prefill gap is a systems bottleneck independent of validation loss.
 
 \subsection{Synthetic State Tracking}
 
@@ -361,14 +354,7 @@ We also added a small synthetic classifier harness for algorithmic state-trackin
 
 \subsection{Compression and Pruning}
 
-Compression was evaluated as a side experiment using non-destructive weight perturbations on fixed validation spans. Row-wise int8 quantize-dequantize is nearly lossless for all three checkpoints, while int4 and unstructured pruning beyond 10\% cause substantial degradation.
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{compression_loss_delta.png}
-    \caption{Validation loss delta after post-training perturbations. Int8 row-wise quantize-dequantize is nearly lossless; int4 and larger pruning ratios require finetuning or better kernels.}
-    \label{fig:compression}
-\end{figure}
+Compression was evaluated as a side experiment using non-destructive weight perturbations on fixed validation spans. Row-wise int8 quantize-dequantize is nearly lossless for all three checkpoints, while int4 and unstructured pruning beyond 10\% cause substantial degradation; Appendix Fig.~\ref{fig:app_compression} shows the corresponding loss deltas.
 
 \begin{table}[t]
 \caption{Compression perturbation loss deltas.}
@@ -427,6 +413,46 @@ We implemented and evaluated \modelname, a Simpson-style SISO discretization for
 {\raggedright
 The best checkpoints are available as Hugging Face repositories \path{soumil1/simamba-midpoint-10m-slimpajama-500m} and \path{soumil1/mamba2-10m-slimpajama-500m}. The local paper assets are generated by \texttt{scripts/generate\_hpml\_paper\_assets.py}.
 \par}
+
+\clearpage
+\appendices
+\section{Result Figures and Per-Run Charts}
+\label{app:charts}
+
+The main text keeps the result narrative and numerical tables close to the claims. The visual evidence is collected here so the results section is not interrupted by large chart exports. The aggregate figures show the overlaid comparisons used for the main claims; the per-run figures below then show the same locally logged training histories as separate labelled charts for each reported run.
+
+\subsection{Aggregate Result Figures}
+
+\appendixwidefigure{wandb_initial_instability.png}{Initial unstable run. Gradient clipping held the post-clip update at 1.0, but the pre-clip norm stayed large and a nonfinite gradient was detected at step 159.}{fig:app_initial_instability}
+
+\appendixwidefigure{wandb_main_500m_val_loss.png}{Fixed validation loss on the 500M-token comparison. \mambatwo continues improving through the second pass; Simpson variants begin to degrade on validation after their best checkpoints.}{fig:app_main_val}
+
+\appendixwidefigure{wandb_main_500m_train_loss.png}{Smoothed training loss for the 500M-token comparison. All models learn the training distribution, so the validation gap is not caused by a broken data path.}{fig:app_main_train}
+
+\appendixwidefigure{wandb_main_500m_grad_norm.png}{Smoothed pre-clip gradient norm. The Simpson variants show larger tail gradient norms than \mambatwo and the matched trapezoid run, consistent with harder optimization.}{fig:app_main_grad}
+
+\appendixwidefigure{wandb_50m_discretization_val_loss.png}{50M-token discretization ablation. The low-control initialization improves Simpson, but the matched trapezoid update remains ahead.}{fig:app_ablation50}
+
+\appendixwidefigure{wandb_localmix_val_loss.png}{Local-mixing controls. Adding Mamba2-style local mixing narrows the gap for Simpson, but local-conv trapezoid is still better at this budget.}{fig:app_localmix}
+
+\appendixsmallfigure{summary_best_val_loss.png}{Best fixed validation loss across the controlled runs. Lower is better.}{fig:app_summary_best}
+
+\appendixsmallfigure{wandb_training_throughput.png}{Median tail training throughput on the V100, computed from the last 100 logged W\&B points for each run.}{fig:app_throughput}
+
+\appendixsmallfigure{simamba_latency.png}{Repository SISO benchmark latency. \modelname decode overhead is small, but the prefill implementation is not competitive without fused-kernel work.}{fig:app_bench_latency}
+
+\appendixsmallfigure{simamba_throughput.png}{Repository SISO benchmark throughput. The current prefill gap is a systems bottleneck independent of validation loss.}{fig:app_bench_throughput}
+
+\appendixsmallfigure{simamba_memory.png}{Repository SISO benchmark memory use. Memory is not the main bottleneck relative to the observed prefill-latency gap.}{fig:app_bench_memory}
+
+\appendixsmallfigure{simamba_ratio_summary.png}{Repository SISO benchmark ratio summary comparing \modelname with the reference \mambathree path.}{fig:app_bench_ratio}
+
+\appendixsmallfigure{compression_loss_delta.png}{Validation loss delta after post-training perturbations. Int8 row-wise quantize-dequantize is nearly lossless; int4 and larger pruning ratios require finetuning or better kernels.}{fig:app_compression}
+
+\FloatBarrier
+\subsection{Per-Run Charts}
+
+\input{assets/paper/per_run_charts.tex}
 
 \begin{thebibliography}{00}
 \bibitem{mamba}

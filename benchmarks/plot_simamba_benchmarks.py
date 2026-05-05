@@ -15,6 +15,11 @@ from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
+try:
+    import seaborn as sns
+except ImportError:  # pragma: no cover - seaborn is cosmetic, not required.
+    sns = None
+
 
 MetricPair = Tuple[float, float]  # (mamba3, simamba)
 
@@ -85,6 +90,11 @@ METRIC_LABELS = {
 LATENCY_METRICS = ["prefill_ms", "step_ms", "e2e_ms"]
 THROUGHPUT_METRICS = ["prefill_toks_s", "step_toks_s", "e2e_total_toks_s", "e2e_gen_toks_s"]
 MEMORY_METRICS = ["prefill_peak_mb", "step_peak_mb"]
+MAMBA3_COLOR = "#4C78A8"
+SIMAMBA_COLOR = "#F58518"
+BAD_RATIO_COLOR = "#E45756"
+GOOD_RATIO_COLOR = "#54A24B"
+GRID_COLOR = "#e8edf3"
 
 
 def _collect_points(metric_names: List[str]) -> List[Tuple[str, float, float]]:
@@ -113,32 +123,42 @@ def _plot_grouped_bars(
     sim_vals = np.array([p[2] for p in points], dtype=np.float64)
     ratios = sim_vals / np.maximum(m3_vals, 1e-12)
 
-    x = np.arange(len(points))
-    width = 0.38
+    y = np.arange(len(points))
+    height = 0.36
 
-    fig, ax = plt.subplots(figsize=(max(12, len(points) * 1.2), 6.5), constrained_layout=True)
-    bars_m3 = ax.bar(x - width / 2, m3_vals, width, label="Mamba-3", color="#4C78A8")
-    bars_sim = ax.bar(x + width / 2, sim_vals, width, label="Simamba", color="#F58518")
+    fig, ax = plt.subplots(figsize=(7.0, max(3.1, len(points) * 0.36)), constrained_layout=True)
+    ax.barh(y - height / 2, m3_vals, height, label="Mamba-3", color=MAMBA3_COLOR, edgecolor="white", linewidth=0.7)
+    bars_sim = ax.barh(
+        y + height / 2,
+        sim_vals,
+        height,
+        label="Simamba",
+        color=SIMAMBA_COLOR,
+        edgecolor="white",
+        linewidth=0.7,
+    )
 
     if log_scale:
-        ax.set_yscale("log")
+        ax.set_xscale("log")
 
-    ax.set_title(title)
-    ax.set_ylabel(y_label)
-    ax.set_xticks(x)
-    ax.set_xticklabels(x_labels, rotation=30, ha="right")
-    ax.grid(axis="y", alpha=0.3)
-    ax.legend(loc="best")
+    ax.set_title(title, fontsize=10.5, weight="bold", pad=8)
+    ax.set_xlabel(y_label)
+    ax.set_yticks(y)
+    ax.set_yticklabels(x_labels)
+    ax.invert_yaxis()
+    ax.grid(axis="x", color=GRID_COLOR, linewidth=0.9)
+    ax.set_axisbelow(True)
+    ax.legend(loc="lower right", frameon=False, fontsize=7.2)
 
     for idx, bar in enumerate(bars_sim):
-        y = bar.get_height()
-        if y <= 0:
+        x_val = bar.get_width()
+        if x_val <= 0:
             continue
         ratio_txt = f"{ratios[idx]:.2f}x"
-        y_text = y * (1.12 if log_scale else 1.02)
-        ax.text(bar.get_x() + bar.get_width() / 2, y_text, ratio_txt, ha="center", va="bottom", fontsize=8)
+        x_text = x_val * (1.10 if log_scale else 1.02)
+        ax.text(x_text, bar.get_y() + bar.get_height() / 2, ratio_txt, ha="left", va="center", fontsize=7.0, color="#334155")
 
-    fig.savefig(out_path, dpi=180)
+    fig.savefig(out_path, dpi=200)
     plt.close(fig)
 
 
@@ -149,25 +169,27 @@ def _plot_ratio_summary(out_path: Path) -> None:
         ("Memory: sim/m3", MEMORY_METRICS),
     ]
 
-    fig, axes = plt.subplots(nrows=3, ncols=1, figsize=(13, 13), constrained_layout=True)
+    fig, axes = plt.subplots(nrows=3, ncols=1, figsize=(7.2, 7.2), constrained_layout=True)
 
     for ax, (title, metrics) in zip(axes, groups):
         points = _collect_points(metrics)
         labels = [p[0] for p in points]
         ratios = np.array([p[2] / max(p[1], 1e-12) for p in points], dtype=np.float64)
 
-        x = np.arange(len(points))
-        colors = ["#E45756" if r > 1.0 else "#54A24B" for r in ratios]
-        ax.bar(x, ratios, color=colors)
-        ax.axhline(1.0, color="black", linewidth=1.0, linestyle="--")
-        ax.set_yscale("log")
-        ax.set_title(title)
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=30, ha="right")
-        ax.set_ylabel("sim/m3")
-        ax.grid(axis="y", alpha=0.3)
+        y = np.arange(len(points))
+        colors = [BAD_RATIO_COLOR if r > 1.0 else GOOD_RATIO_COLOR for r in ratios]
+        ax.barh(y, ratios, color=colors, edgecolor="white", linewidth=0.7)
+        ax.axvline(1.0, color="#111827", linewidth=1.0, linestyle="--")
+        ax.set_xscale("log")
+        ax.set_title(title, fontsize=9.2, weight="bold", pad=6)
+        ax.set_yticks(y)
+        ax.set_yticklabels(labels, fontsize=6.5)
+        ax.invert_yaxis()
+        ax.set_xlabel("sim/m3")
+        ax.grid(axis="x", color=GRID_COLOR, linewidth=0.9)
+        ax.set_axisbelow(True)
 
-    fig.savefig(out_path, dpi=180)
+    fig.savefig(out_path, dpi=200)
     plt.close(fig)
 
 
@@ -179,10 +201,13 @@ def main() -> None:
     outdir = args.outdir
     outdir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        plt.style.use("seaborn-v0_8-whitegrid")
-    except Exception:
-        pass
+    if sns is not None:
+        sns.set_theme(style="whitegrid", context="paper")
+    else:
+        try:
+            plt.style.use("seaborn-v0_8-whitegrid")
+        except Exception:
+            pass
 
     latency_points = _collect_points(LATENCY_METRICS)
     throughput_points = _collect_points(THROUGHPUT_METRICS)
