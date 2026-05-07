@@ -5,3 +5,11 @@ build/
 *.hip
 *_hip.*
 .venv/
+wandb/
+profiling/ncu_kernel_profile.py
+profiling/test_kernel/
+profiling/results/
+profiling/results/**/*.sqlite
+profiling/results/**/*.ncu-rep
+profiling/results/ncu*/
+profiling/results/test_kernel*/

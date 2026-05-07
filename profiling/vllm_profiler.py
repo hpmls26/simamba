@@ -8,9 +8,15 @@ from vllm import LLM, SamplingParams
 
 
 def mamba2_hf_overrides(config):
-    """Fill vLLM's generic architecture fields for HF Mamba2 configs."""
-    if getattr(config, "model_type", None) == "mamba2":
+    """Fill vLLM's generic architecture fields for HF Mamba-family configs."""
+    if getattr(config, "model_type", None) in {"mamba2", "simamba"}:
         num_heads = getattr(config, "num_heads", None)
+        if num_heads is None and getattr(config, "model_type", None) == "simamba":
+            ssm_cfg = getattr(config, "ssm_cfg", {}) or {}
+            headdim = ssm_cfg.get("headdim")
+            hidden_size = getattr(config, "hidden_size", getattr(config, "d_model", None))
+            if headdim and hidden_size:
+                num_heads = hidden_size // headdim
         if num_heads is not None:
             if not hasattr(config, "num_attention_heads"):
                 config.num_attention_heads = num_heads
@@ -30,7 +36,7 @@ def main(args):
 
     # 2. Initialize Weights & Biases
     run = wandb.init(
-        project=os.environ.get("WANDB_PROJECT", "ssb2234-columbia"),
+        project=os.environ.get("WANDB_PROJECT", "profiling"),
         job_type="profile",
         name=args.wandb_name,
         config={

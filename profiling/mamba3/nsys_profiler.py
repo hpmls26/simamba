@@ -9,7 +9,7 @@ def main():
     
     # 1. Initialize W&B
     run = wandb.init(
-        project=os.environ.get("WANDB_PROJECT", "ssb2234-columbia"),
+        project=os.environ.get("WANDB_PROJECT", "profiling"),
         job_type="kernel_profiling",
         name="mamba_combined"
     )

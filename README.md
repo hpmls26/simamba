@@ -226,6 +226,23 @@ python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-space
 ```
 
 
+## Profiling
+
+To regenerate the profiler traces and plots referenced by the Simamba report,
+run the profiling scripts from the repository root on a CUDA machine with
+Nsight Systems, vLLM, and W&B credentials available. Profiling runs log to the
+W&B project `profiling`; training runs still log to `simamba`.
+
+```bash
+python profiling/nsys_kernel_profile.py --kernels simamba,mamba3 --batch 2 --seqlen 256 --nheads 32 --headdim 64 --out-dir results/nsys_task_named_wandb --wandb
+python profiling/vllm_combine_results.py --summary-csvs results/vllm_mamba2_repeated_summary.csv results/vllm_simamba_repeated_off_summary.csv results/vllm_simamba_repeated_on_summary.csv --raw-csvs results/vllm_mamba2_repeated_raw.csv results/vllm_simamba_repeated_off_raw.csv results/vllm_simamba_repeated_on_raw.csv --out results/vllm_repeated_combined_summary.csv --raw-out results/vllm_repeated_combined_raw.csv --plot-out results/vllm_repeated_combined_summary.png --wandb
+```
+
+Open `.nsys-rep` files in Nsight Systems. The full reproducibility command
+list is in [`REAMDE.md`](REAMDE.md#f-profiling), and detailed profiler usage is
+in [`profiling/README.md`](profiling/README.md).
+
+
 ## Troubleshooting
 
 ### Precision

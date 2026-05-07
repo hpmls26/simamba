@@ -5,7 +5,11 @@ from simamba_siso_combined import simamba_siso_combined
 
 def main():
     # Setup Mock Tensors
-    batch, seqlen, nheads, headdim = 2, 256, 32, 64
+    batch = int(os.environ.get("PROFILE_BATCH", "2"))
+    seqlen = int(os.environ.get("PROFILE_SEQLEN", "256"))
+    nheads = int(os.environ.get("PROFILE_NHEADS", "32"))
+    headdim = int(os.environ.get("PROFILE_HEADDIM", "64"))
+    warmup_iters = int(os.environ.get("PROFILE_WARMUP", "5"))
     n_angles = headdim // 2
     device = "cuda"
 
@@ -24,7 +28,7 @@ def main():
 
     # Warmup
     print("Running warmup...")
-    for _ in range(5):
+    for _ in range(warmup_iters):
         _ = simamba_siso_combined(Q, K, V, ADT, DT, Simpson, Q_bias, K_bias, Angles)
     torch.cuda.synchronize()
 
