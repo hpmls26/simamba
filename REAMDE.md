@@ -101,6 +101,7 @@ Lower validation loss is better. The central result is negative but reproducible
 │   ├── plot_simamba_benchmarks.py
 │   └── plots/
 ├── profiling/
+│   ├── run_all_profiling.py            # One-command final profiling pipeline
 │   ├── nsys_kernel_profile.py          # Nsight Systems trace/export harness
 │   ├── vllm_sweep.py                   # TTFT/TPOT/tok/s and prefix-cache profiling
 │   ├── vllm_combine_results.py         # Combined vLLM tables and matplotlib plot
@@ -278,117 +279,24 @@ Regenerate the final paper plots and CSV summaries:
 
 ### F. Profiling
 
-To regenerate the profiler traces and vLLM plots referenced in the report, run
-the commands below from the repository root on a CUDA machine with Nsight
-Systems, vLLM, and W&B credentials available. Profiling runs log to the W&B
-project `profiling`; training runs still log to `simamba`.
-
-Generate Nsight Systems traces for Simamba and the Mamba-3 SISO baseline:
+To regenerate all final profiling artifacts referenced in the report, run the
+orchestrator from the repository root on a CUDA machine with Nsight Systems,
+vLLM, `nvidia-smi`, and W&B credentials available:
 
 ```bash
-python profiling/nsys_kernel_profile.py \
-  --kernels simamba,mamba3 \
-  --batch 2 \
-  --seqlen 256 \
-  --nheads 32 \
-  --headdim 64 \
-  --out-dir results/nsys_task_named_wandb \
-  --wandb \
-  --wandb-group task_1_nsys_prefill_baselines \
-  --wandb-name task_1_nsys_simamba_mamba3_prefill_b2_s256
+python profiling/run_all_profiling.py --wandb
 ```
 
-This writes `.nsys-rep` traces and exported CSV summaries under
-`profiling/results/nsys_task_named_wandb/`. Open the `.nsys-rep` files in
-Nsight Systems, or inspect the generated `nsys_exports/*_{cuda_gpu_kern_sum,
-cuda_api_sum,nvtx_sum,osrt_sum}.csv` files.
+The script runs the final NSYS, vLLM, vLLM-combine, correctness, and W&B-bundle
+steps with the report models:
+`soumil1/mamba2-10m-slimpajama-500m` and
+`soumil1/simamba-midpoint-10m-slimpajama-500m`. Profiling logs to the W&B
+project `profiling`; training logs still use `simamba`.
 
-Regenerate vLLM TTFT/TPOT/tok/s, prefill-probe, decode-loop, repeated-sample,
-and GPU-memory measurements. The profiler records five measured repeats after
-one warmup and logs raw samples, aggregate statistics, and a matplotlib plot:
-
-```bash
-python profiling/vllm_sweep.py \
-  --models soumil1/mamba2-10m-slimpajama-500m \
-  --prompt-words 128 \
-  --batch-sizes 1 \
-  --max-tokens 32 \
-  --prefix-cache-modes off,on \
-  --repeated-prefix-tokens 512 \
-  --mamba-block-size 16 \
-  --warmup 1 \
-  --repeats 5 \
-  --out results/vllm_mamba2_repeated_summary.csv \
-  --raw-out results/vllm_mamba2_repeated_raw.csv \
-  --plot-out results/vllm_mamba2_repeated_summary.png \
-  --wandb \
-  --wandb-group task_3_vllm_repeated_profile_fixed \
-  --wandb-name task_3_vllm_mamba2_repeated_cache_off_on
-
-python profiling/vllm_sweep.py \
-  --models soumil1/simamba-midpoint-10m-slimpajama-500m \
-  --prompt-words 128 \
-  --batch-sizes 1 \
-  --max-tokens 32 \
-  --prefix-cache-modes off \
-  --repeated-prefix-tokens 512 \
-  --warmup 1 \
-  --repeats 5 \
-  --trust-remote-code \
-  --model-impl transformers \
-  --force-transformers-backend-compatible \
-  --out results/vllm_simamba_repeated_off_summary.csv \
-  --raw-out results/vllm_simamba_repeated_off_raw.csv \
-  --plot-out results/vllm_simamba_repeated_off_summary.png \
-  --wandb \
-  --wandb-group task_3_vllm_repeated_profile_fixed \
-  --wandb-name task_3_vllm_simamba_repeated_cache_off
-
-python profiling/vllm_sweep.py \
-  --models soumil1/simamba-midpoint-10m-slimpajama-500m \
-  --prompt-words 128 \
-  --batch-sizes 1 \
-  --max-tokens 32 \
-  --prefix-cache-modes on \
-  --repeated-prefix-tokens 512 \
-  --mamba-block-size 16 \
-  --warmup 1 \
-  --repeats 5 \
-  --trust-remote-code \
-  --model-impl transformers \
-  --force-transformers-backend-compatible \
-  --out results/vllm_simamba_repeated_on_summary.csv \
-  --raw-out results/vllm_simamba_repeated_on_raw.csv \
-  --plot-out results/vllm_simamba_repeated_on_summary.png \
-  --wandb \
-  --wandb-group task_3_vllm_repeated_profile_fixed \
-  --wandb-name task_3_vllm_simamba_repeated_cache_on
-```
-
-Combine the vLLM raw/summary CSVs and regenerate the comparison plot:
-
-```bash
-python profiling/vllm_combine_results.py \
-  --summary-csvs results/vllm_mamba2_repeated_summary.csv results/vllm_simamba_repeated_off_summary.csv results/vllm_simamba_repeated_on_summary.csv \
-  --raw-csvs results/vllm_mamba2_repeated_raw.csv results/vllm_simamba_repeated_off_raw.csv results/vllm_simamba_repeated_on_raw.csv \
-  --out results/vllm_repeated_combined_summary.csv \
-  --raw-out results/vllm_repeated_combined_raw.csv \
-  --plot-out results/vllm_repeated_combined_summary.png \
-  --wandb \
-  --wandb-group task_3_vllm_repeated_profile_fixed \
-  --wandb-name task_3_vllm_combined_repeated_profile_fixed
-```
-
-Regenerate the Triton-vs-PyTorch forward/backward correctness table:
-
-```bash
-python profiling/kernel_correctness.py \
-  --out results/kernel_correctness_reference.csv \
-  --md-out results/kernel_correctness_reference.md \
-  --wandb \
-  --wandb-group task_5_correctness_triton_vs_pytorch_reference \
-  --wandb-name task_5_correctness_forward_backward_reference
-```
+Use `--dry-run` to print the underlying commands, `--steps` to run a subset
+such as `--steps nsys,vllm,combine`, and `--nsys-bin` if `nsys` is not at
+`/usr/local/cuda/bin/nsys`. The optional sweep helpers are available through
+`--steps kernel-sweep,plots` but were not part of the final project claims.
 
 The main regenerated artifacts are:
 
@@ -399,6 +307,10 @@ The main regenerated artifacts are:
 - `profiling/results/vllm_repeated_combined_summary.png`
 - `profiling/results/kernel_correctness_reference.csv`
 - `profiling/results/kernel_correctness_reference.md`
+
+Open `.nsys-rep` files in Nsight Systems, inspect `nsys_exports/*.csv` for
+CUDA/NVTX/API summaries, and use `vllm_repeated_combined_summary.png` for the
+matplotlib comparison plot.
 
 The corresponding W&B project is
 [`ssb2234-columbia/profiling`](https://wandb.ai/ssb2234-columbia/profiling).

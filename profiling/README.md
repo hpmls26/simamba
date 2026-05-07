@@ -3,6 +3,23 @@
 This directory keeps only runnable profiling harnesses and the local kernel
 sources they import.
 
+## Final Report Pipeline
+
+Run the full final-report profiling reproduction from the repository root:
+
+```bash
+python profiling/run_all_profiling.py --wandb
+```
+
+This runs the report NSYS traces, vLLM repeated measurements, vLLM combination
+plot, Triton-vs-PyTorch correctness table, and final W&B artifact bundle. Use
+`--dry-run` to inspect the underlying commands before launching long GPU jobs.
+Use `--steps nsys,vllm,combine,correctness` to run a subset, or
+`--steps kernel-sweep,plots` for the optional sweep helpers.
+
+The script defaults to W&B project `profiling` when `--wandb` is set. Training
+jobs elsewhere in the repository still use project `simamba`.
+
 ## Kernel NSYS Profiles
 
 Run from each kernel directory so local imports resolve correctly:
@@ -92,94 +109,13 @@ The plotting script writes:
 
 ## W&B Full Rerun
 
-All report scripts support `--wandb` and default to project `profiling`.
-The full rerun logs under group `profiling_full_run`:
+All report scripts support `--wandb`, but the preferred full rerun entrypoint
+is the orchestrator:
 
 ```bash
-python profiling/nsys_kernel_profile.py \
-  --kernels simamba,mamba3 \
-  --batch 2 \
-  --seqlen 256 \
-  --nheads 32 \
-  --headdim 64 \
-  --out-dir results/nsys_task_named_wandb \
-  --wandb \
-  --wandb-group task_1_nsys_prefill_baselines \
-  --wandb-name task_1_nsys_simamba_mamba3_prefill_b2_s256
-
-python profiling/vllm_sweep.py \
-  --models soumil1/mamba2-10m-slimpajama-500m \
-  --prompt-words 128 \
-  --batch-sizes 1 \
-  --max-tokens 32 \
-  --prefix-cache-modes off,on \
-  --repeated-prefix-tokens 512 \
-  --mamba-block-size 16 \
-  --warmup 1 \
-  --repeats 5 \
-  --out results/vllm_mamba2_repeated_summary.csv \
-  --raw-out results/vllm_mamba2_repeated_raw.csv \
-  --plot-out results/vllm_mamba2_repeated_summary.png \
-  --wandb \
-  --wandb-group task_3_vllm_repeated_profile_fixed \
-  --wandb-name task_3_vllm_mamba2_repeated_cache_off_on
-
-python profiling/vllm_sweep.py \
-  --models soumil1/simamba-midpoint-10m-slimpajama-500m \
-  --prompt-words 128 \
-  --batch-sizes 1 \
-  --max-tokens 32 \
-  --prefix-cache-modes off \
-  --repeated-prefix-tokens 512 \
-  --warmup 1 \
-  --trust-remote-code \
-  --model-impl transformers \
-  --force-transformers-backend-compatible \
-  --repeats 5 \
-  --out results/vllm_simamba_repeated_off_summary.csv \
-  --raw-out results/vllm_simamba_repeated_off_raw.csv \
-  --plot-out results/vllm_simamba_repeated_off_summary.png \
-  --wandb \
-  --wandb-group task_3_vllm_repeated_profile_fixed \
-  --wandb-name task_3_vllm_simamba_repeated_cache_off
-
-python profiling/vllm_sweep.py \
-  --models soumil1/simamba-midpoint-10m-slimpajama-500m \
-  --prompt-words 128 \
-  --batch-sizes 1 \
-  --max-tokens 32 \
-  --prefix-cache-modes on \
-  --repeated-prefix-tokens 512 \
-  --mamba-block-size 16 \
-  --warmup 1 \
-  --trust-remote-code \
-  --model-impl transformers \
-  --force-transformers-backend-compatible \
-  --repeats 5 \
-  --out results/vllm_simamba_repeated_on_summary.csv \
-  --raw-out results/vllm_simamba_repeated_on_raw.csv \
-  --plot-out results/vllm_simamba_repeated_on_summary.png \
-  --wandb \
-  --wandb-group task_3_vllm_repeated_profile_fixed \
-  --wandb-name task_3_vllm_simamba_repeated_cache_on
-
-python profiling/vllm_combine_results.py \
-  --summary-csvs results/vllm_mamba2_repeated_summary.csv results/vllm_simamba_repeated_off_summary.csv results/vllm_simamba_repeated_on_summary.csv \
-  --raw-csvs results/vllm_mamba2_repeated_raw.csv results/vllm_simamba_repeated_off_raw.csv results/vllm_simamba_repeated_on_raw.csv \
-  --out results/vllm_repeated_combined_summary.csv \
-  --raw-out results/vllm_repeated_combined_raw.csv \
-  --plot-out results/vllm_repeated_combined_summary.png \
-  --wandb \
-  --wandb-group task_3_vllm_repeated_profile_fixed \
-  --wandb-name task_3_vllm_combined_repeated_profile_fixed
-
-python profiling/kernel_correctness.py \
-  --out results/kernel_correctness_reference.csv \
-  --md-out results/kernel_correctness_reference.md \
-  --wandb \
-  --wandb-group task_5_correctness_triton_vs_pytorch_reference \
-  --wandb-name task_5_correctness_forward_backward_reference
+python profiling/run_all_profiling.py --wandb
 ```
 
 The W&B artifact names are `nsys_kernel_reports`, `vllm_sweep_results`,
-`kernel_correctness_reference`, and `profiling_full_run_bundle`.
+`vllm_combined_repeated_profile`, `kernel_correctness_reference`, and
+`profiling_full_run_bundle`.
