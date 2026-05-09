@@ -10,17 +10,22 @@ import wandb
 KERNEL_DIRS = {
     "simamba": "simamba",
     "mamba3": "mamba3",
+    "improved": "test_kernel",
 }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Collect Nsight Systems reports for kernel profilers.")
-    parser.add_argument("--kernels", default="simamba,mamba3")
+    parser.add_argument("--kernels", default="mamba3,simamba,improved")
     parser.add_argument("--batch", type=int, default=2)
     parser.add_argument("--seqlen", type=int, default=256)
     parser.add_argument("--nheads", type=int, default=32)
     parser.add_argument("--headdim", type=int, default=64)
     parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--dtype", choices=["fp32", "bf16", "fp16"], default="fp32")
+    parser.add_argument("--chunk-size", type=int, default=64)
+    parser.add_argument("--num-warps", type=int, default=8)
+    parser.add_argument("--num-stages", type=int, default=3)
     parser.add_argument("--out-dir", default="results/nsys")
     parser.add_argument("--nsys-bin", default="/usr/local/cuda/bin/nsys")
     parser.add_argument("--stats-reports", default="cuda_gpu_kern_sum,cuda_api_sum,nvtx_sum,osrt_sum")
@@ -47,6 +52,8 @@ def main():
     produced = []
     stats_files = []
     for kernel in [item for item in args.kernels.split(",") if item]:
+        if kernel not in KERNEL_DIRS:
+            raise ValueError(f"Unknown kernel {kernel!r}; choose from {sorted(KERNEL_DIRS)}")
         workdir = root / KERNEL_DIRS[kernel]
         stem = f"{kernel}_b{args.batch}_s{args.seqlen}_h{args.nheads}_d{args.headdim}"
         out_stem = out_dir / stem
@@ -59,6 +66,10 @@ def main():
             "PROFILE_NHEADS": str(args.nheads),
             "PROFILE_HEADDIM": str(args.headdim),
             "PROFILE_WARMUP": str(args.warmup),
+            "PROFILE_DTYPE": args.dtype,
+            "PROFILE_CHUNK_SIZE": str(args.chunk_size),
+            "PROFILE_NUM_WARPS": str(args.num_warps),
+            "PROFILE_NUM_STAGES": str(args.num_stages),
         })
         cmd = [
             args.nsys_bin,
@@ -81,10 +92,12 @@ def main():
         produced.append(report)
         stats_dir = out_dir / args.stats_out_dir
         stats_dir.mkdir(parents=True, exist_ok=True)
-        stats_prefix = stats_dir / f"{kernel}_stats"
+        stats_prefix = stats_dir / f"{stem}_stats"
         stats_cmd = [
             args.nsys_bin,
             "stats",
+            "--force-export=true",
+            "--force-overwrite=true",
             "--report",
             args.stats_reports,
             "--format",
@@ -95,7 +108,7 @@ def main():
         ]
         print(" ".join(stats_cmd), flush=True)
         subprocess.run(stats_cmd, check=True)
-        stats_files.extend(sorted(stats_dir.glob(f"{kernel}_stats_*.csv")))
+        stats_files.extend(sorted(stats_dir.glob(f"{stem}_stats_*.csv")))
         if run is not None:
             wandb.log({
                 "kernel": kernel,

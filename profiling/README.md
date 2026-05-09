@@ -1,121 +1,174 @@
 # Profiling
 
-This directory keeps only runnable profiling harnesses and the local kernel
-sources they import.
-
-## Final Report Pipeline
-
-Run the full final-report profiling reproduction from the repository root:
+This directory contains the runnable profiling harnesses for the Simamba
+project. The preferred entrypoint is the orchestration script from the
+repository root:
 
 ```bash
 python profiling/run_all_profiling.py --wandb
 ```
 
-This runs the report NSYS traces, vLLM repeated measurements, vLLM combination
-plot, Triton-vs-PyTorch correctness table, and final W&B artifact bundle. Use
-`--dry-run` to inspect the underlying commands before launching long GPU jobs.
-Use `--steps nsys,vllm,combine,correctness` to run a subset, or
-`--steps kernel-sweep,plots` for the optional sweep helpers.
-
-The script defaults to W&B project `profiling` when `--wandb` is set. Training
-jobs elsewhere in the repository still use project `simamba`.
-
-## Kernel NSYS Profiles
-
-Run from each kernel directory so local imports resolve correctly:
+Use `--dry-run` to print every command without running GPU work. Use `--steps`
+to run only part of the pipeline:
 
 ```bash
-cd profiling/simamba
-python nsys_profiler.py
+python profiling/run_all_profiling.py --steps kernel-nsys,kernel-correctness
+python profiling/run_all_profiling.py --steps vllm,vllm-combine --wandb
 ```
+
+When `--wandb` is set, all profiling runs use W&B project `profiling`.
+Training scripts elsewhere in the repo still use W&B project `simamba`.
+
+## Requirements
+
+Install the repo with Triton support and install the profiling-only Python
+packages:
 
 ```bash
-cd profiling/mamba3
-python nsys_profiler.py
+python -m pip install -e '.[train,triton,causal-conv1d]' --no-build-isolation
+python -m pip install vllm matplotlib wandb
 ```
 
-`simamba/` profiles the Simamba SISO combined kernel. `mamba3/` profiles the
-Euler/original discretization SISO combined kernel.
+The machine must also provide `nvidia-smi`, Nsight Systems (`nsys`), and Nsight
+Compute (`ncu`). The orchestrator defaults to `/usr/local/cuda/bin/nsys` and
+`/usr/local/cuda/bin/ncu`; override those with `--nsys-bin` and `--ncu-bin`.
+If NCU fails with `ERR_NVGPUCTRPERM`, rerun with `--sudo-ncu` on systems where
+sudo is allowed.
 
-## vLLM Profiles
+## Orchestration Steps
 
-Run from `profiling/`:
+### 1. Kernel NSYS
+
+Runs Nsight Systems once for each kernel target:
+
+- `mamba3`: `mamba_ssm.ops.triton.mamba3.mamba3_siso_combined`
+- `simamba`: `mamba_ssm.ops.triton.simamba.mamba3_siso_combined`
+- `improved`: `profiling/test_kernel/improved_simamba_kernel.py`
+
+The command writes `.nsys-rep` traces and exports report-ready CSV summaries
+with `nsys stats` for CUDA kernel time, CUDA API time, NVTX ranges, and OS
+runtime:
+
+```text
+profiling/results/kernel_suite/nsys/
+profiling/results/kernel_suite/nsys/csv_exports/
+```
+
+### 2. Kernel NCU
+
+Runs Nsight Compute with kernel-name filters so the report targets the useful
+kernel launches instead of only the first CUDA launch. Default targets are:
+
+- `mamba3_siso_fwd_kernel`
+- `simamba_siso_fwd_kernel`
+- `improved_siso_prefill_kernel`
+
+Each target writes a `.ncu-rep` report, the direct profiler stdout CSV, an
+imported raw CSV, and a text details export under:
+
+```text
+profiling/results/kernel_suite/ncu/
+```
+
+Useful overrides:
 
 ```bash
-python vllm_profiler.py --model state-spaces/mamba-130m-hf --wandb_name vllm_mamba_130m_hf
-python vllm_profiler.py --model benchang1110/mamba2-130m-hf --wandb_name vllm_mamba2_130m_hf
-python vllm_profiler.py --model soumil1/mamba2-10m-slimpajama-500m --wandb_name vllm_soumil1_mamba2_10m_slimpajama_500m
+python profiling/run_all_profiling.py \
+  --steps kernel-ncu \
+  --ncu-seq-lens 256,1024 \
+  --ncu-batch-sizes 1,2 \
+  --sudo-ncu
 ```
 
-The scripts default W&B logging to project `profiling`.
+### 3. Correctness
 
-## Report Data Sweeps
+Builds a Triton-vs-PyTorch reference table for the kernel suite:
 
-Kernel latency, memory, optional backward timing, and optional correctness:
+- Mamba3 forward/backward against a PyTorch Mamba3 SISO reference.
+- Simamba forward/backward against the PyTorch Simamba SISO reference.
+- Improved Simamba forward against the PyTorch Simamba SISO reference.
+
+The improved kernel is a forward-only prototype, so its backward row is marked
+`not_applicable`. The Mamba3 correctness check covers the core recurrence,
+bias, rotary, and input-gradient path with D/Z disabled to avoid a known
+small-shape D/Z backward compiler limitation.
+
+Outputs:
+
+```text
+profiling/results/kernel_suite/kernel_correctness.csv
+profiling/results/kernel_suite/kernel_correctness.md
+profiling/results/kernel_suite/kernel_correctness.png
+```
+
+### 4. vLLM Model Sweep
+
+Runs repeated vLLM measurements for:
+
+- Mamba2: `soumil1/mamba2-10m-slimpajama-500m`
+- Improved Simamba: `outputs/improved_simamba_10m_slimpajama500m_20260508_013540/vllm_export`
+
+The sweep logs raw samples and summary statistics for TTFT, TPOT, end-to-end
+tok/s, decode-loop tok/s, prefill-probe latency, requests/s, GPU memory peak
+and delta, model-load memory delta, prefix caching on/off, and 512-token
+repeated-prefix prompts.
+
+The sweep exits non-zero if any model/load/generation row fails, so report runs
+do not silently upload partial `load_failed` data. Use `--allow-failures` only
+for exploratory debugging.
+
+Outputs:
+
+```text
+profiling/results/vllm_mamba2_summary.csv
+profiling/results/vllm_mamba2_raw.csv
+profiling/results/vllm_mamba2.png
+profiling/results/vllm_improved_simamba_summary.csv
+profiling/results/vllm_improved_simamba_raw.csv
+profiling/results/vllm_improved_simamba.png
+```
+
+The improved Simamba run uses the vLLM fork at `/tmp/hpmls26_vllm` by default
+and passes `--simamba-native-backend triton`. Override with:
 
 ```bash
-python profiling/kernel_sweep.py \
-  --seq-lens 128,256,512,1024 \
-  --batch-sizes 1,2,4 \
-  --iters 20 \
-  --compare \
-  --wandb \
-  --out results/kernel_sweep.csv
+python profiling/run_all_profiling.py \
+  --steps vllm \
+  --improved-model /path/to/vllm_export \
+  --simamba-vllm-fork /path/to/vllm
 ```
 
-vLLM throughput and latency sweeps:
+### 5. Combined vLLM Plot and Bundle
+
+`vllm-combine` merges the Mamba2 and improved Simamba CSVs and creates a single
+comparison plot:
+
+```text
+profiling/results/vllm_mamba2_vs_improved_summary.csv
+profiling/results/vllm_mamba2_vs_improved_raw.csv
+profiling/results/vllm_mamba2_vs_improved.png
+```
+
+When `--wandb` is set, the final `bundle` step uploads the kernel traces,
+CSV exports, correctness tables/plots, vLLM raw data, and matplotlib plots as a
+single W&B artifact.
+
+## Common Commands
+
+Full local run without W&B:
 
 ```bash
-python profiling/vllm_sweep.py \
-  --prompt-words 32,128,512 \
-  --batch-sizes 1,2,4 \
-  --max-tokens 32,128 \
-  --warmup 1 \
-  --repeats 5 \
-  --wandb \
-  --out results/vllm_sweep.csv
+python profiling/run_all_profiling.py
 ```
 
-The sweep writes a summary CSV, a raw-samples CSV, and a matplotlib summary
-plot. GPU memory is sampled from global device usage via `nvidia-smi`, so it
-captures vLLM worker-process memory instead of parent-process PyTorch
-allocations. Summary rows include mean, median, p95, std, min, and max for
-TTFT, TPOT, total tok/s, explicit decode-loop timing, prefill-probe timing,
-and GPU memory.
-
-Create report plots after the sweeps:
+Full W&B run with NCU through sudo:
 
 ```bash
-python profiling/plot_profile_results.py \
-  --kernel-csv results/kernel_sweep.csv \
-  --vllm-csv results/vllm_sweep.csv \
-  --out-dir results/plots \
-  --wandb
+python profiling/run_all_profiling.py --wandb --sudo-ncu
 ```
 
-The plotting script writes:
-
-- `kernel_latency.png`
-- `kernel_memory.png`
-- `vllm_throughput.png`
-- `vllm_latency.png`
-
-## Current Report Artifacts
-
-- vLLM Mamba2/Simamba TTFT, TPOT, tok/s, 512-token repeated-prefix rows, decode-loop timing, prefill-probe timing, and GPU-memory summaries: `results/vllm_repeated_combined_summary.csv`
-- Raw repeated vLLM samples: `results/vllm_repeated_combined_raw.csv`
-- vLLM matplotlib comparison plot: `results/vllm_repeated_combined_summary.png`
-- Triton-vs-PyTorch forward/backward correctness: `results/kernel_correctness_reference.csv` and `results/kernel_correctness_reference.md`
-
-## W&B Full Rerun
-
-All report scripts support `--wandb`, but the preferred full rerun entrypoint
-is the orchestrator:
+Fast command inspection:
 
 ```bash
-python profiling/run_all_profiling.py --wandb
+python profiling/run_all_profiling.py --dry-run --wandb
 ```
-
-The W&B artifact names are `nsys_kernel_reports`, `vllm_sweep_results`,
-`vllm_combined_repeated_profile`, `kernel_correctness_reference`, and
-`profiling_full_run_bundle`.

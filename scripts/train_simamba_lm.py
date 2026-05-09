@@ -155,7 +155,7 @@ def parse_args():
         ),
     )
     parser.add_argument("--simamba-discretization", choices=["simpson", "trapezoid"], default="simpson")
-    parser.add_argument("--simamba-backend", choices=["reference", "triton"], default="triton")
+    parser.add_argument("--simamba-backend", choices=["reference", "triton", "improved"], default="triton")
     parser.add_argument("--simamba-outproj-norm", action="store_true")
     parser.add_argument("--mamba2-d-state", type=int, default=128)
     parser.add_argument("--mamba2-d-conv", type=int, default=4)
@@ -529,7 +529,7 @@ def resolve_simamba_a_max(args, device: torch.device) -> tuple[float, Optional[f
 
     fp16_triton_cuda = (
         args.dtype == "fp16"
-        and args.simamba_backend == "triton"
+        and args.simamba_backend in {"triton", "improved"}
         and device.type == "cuda"
     )
     if requested_a_max is None:
@@ -847,7 +847,7 @@ def main():
         )
         if (
             args.dtype == "fp16"
-            and args.simamba_backend == "triton"
+            and args.simamba_backend in {"triton", "improved"}
             and simamba_fp16_stability_product is not None
             and simamba_fp16_stability_product > 8.0
         ):

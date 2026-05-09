@@ -1,6 +1,14 @@
 import os
+import sys
+from pathlib import Path
+
 import torch
-from mamba3_siso_bwd import compute_dcoeffs
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from mamba_ssm.ops.triton.simamba.mamba3_siso_bwd import compute_dcoeffs
 
 def main():
     # Setup Mock Tensors

@@ -12,6 +12,7 @@ def main():
     parser.add_argument("--group", default="profiling_full_run")
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--paths", nargs="+", required=True)
+    parser.add_argument("--allow-missing", action="store_true")
     args = parser.parse_args()
 
     run = wandb.init(
@@ -22,6 +23,7 @@ def main():
         config=vars(args),
     )
     artifact = wandb.Artifact(args.name, type=args.type)
+    missing = []
     for item in args.paths:
         path = Path(item)
         if path.is_dir():
@@ -29,10 +31,13 @@ def main():
         elif path.exists():
             artifact.add_file(str(path))
         else:
+            missing.append(item)
             wandb.log({f"missing/{item}": 1})
             print(f"missing: {item}", flush=True)
     run.log_artifact(artifact)
     wandb.finish()
+    if missing and not args.allow_missing:
+        raise RuntimeError(f"Missing expected artifact paths: {missing}")
 
 
 if __name__ == "__main__":

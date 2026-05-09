@@ -1,7 +1,16 @@
 import os
+import sys
+from pathlib import Path
+
 import torch
 
-from simamba_siso_combined import simamba_siso_combined
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from mamba_ssm.ops.triton.simamba.mamba3_siso_combined import (
+    mamba3_siso_combined as simamba_triton_siso_combined,
+)
 
 def main():
     # Setup Mock Tensors
@@ -21,6 +30,7 @@ def main():
     ADT = torch.randn(batch, nheads, seqlen, device=device)
     DT = torch.randn(batch, nheads, seqlen, device=device)
     Simpson = torch.randn(batch, nheads, seqlen, device=device)
+    Midpoint = torch.randn(batch, nheads, seqlen, device=device)
     
     Q_bias = torch.randn(nheads, headdim, device=device)
     K_bias = torch.randn(nheads, headdim, device=device)
@@ -29,7 +39,9 @@ def main():
     # Warmup
     print("Running warmup...")
     for _ in range(warmup_iters):
-        _ = simamba_siso_combined(Q, K, V, ADT, DT, Simpson, Q_bias, K_bias, Angles)
+        _ = simamba_triton_siso_combined(
+            Q, K, V, ADT, DT, Simpson, Q_bias, K_bias, Angles, Midpoint=Midpoint
+        )
     torch.cuda.synchronize()
 
     # Read the environment variable set by nsys_profiler.py
@@ -40,7 +52,9 @@ def main():
         print("Running PyTorch Profiler...")
         from torch.profiler import profile, ProfilerActivity
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-            _ = simamba_siso_combined(Q, K, V, ADT, DT, Simpson, Q_bias, K_bias, Angles)
+            _ = simamba_triton_siso_combined(
+                Q, K, V, ADT, DT, Simpson, Q_bias, K_bias, Angles, Midpoint=Midpoint
+            )
             torch.cuda.synchronize()
     else:
         # NSYS mode: PyTorch Profiler is entirely bypassed
@@ -48,7 +62,9 @@ def main():
         torch.cuda.cudart().cudaProfilerStart()
         torch.cuda.nvtx.range_push("Simamba_Fwd_Combined_Loop")
         
-        _ = simamba_siso_combined(Q, K, V, ADT, DT, Simpson, Q_bias, K_bias, Angles)
+        _ = simamba_triton_siso_combined(
+            Q, K, V, ADT, DT, Simpson, Q_bias, K_bias, Angles, Midpoint=Midpoint
+        )
         torch.cuda.synchronize()
         
         torch.cuda.nvtx.range_pop()

@@ -1,7 +1,14 @@
 import os
+import sys
+from pathlib import Path
+
 import torch
 
-from mamba3_siso_combined import mamba3_siso_combined
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combined
 
 def main():
     # Setup Mock Tensors
@@ -20,7 +27,7 @@ def main():
     
     ADT = torch.randn(batch, nheads, seqlen, device=device)
     DT = torch.randn(batch, nheads, seqlen, device=device)
-    Simpson = torch.randn(batch, nheads, seqlen, device=device)
+    Trap = torch.randn(batch, nheads, seqlen, device=device)
     
     Q_bias = torch.randn(nheads, headdim, device=device)
     K_bias = torch.randn(nheads, headdim, device=device)
@@ -29,7 +36,7 @@ def main():
     # Warmup
     print("Running warmup...")
     for _ in range(warmup_iters):
-        warmup_output = mamba3_siso_combined(Q, K, V, ADT, DT, Simpson, Q_bias, K_bias, Angles)
+        warmup_output = mamba3_siso_combined(Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles)
     torch.cuda.synchronize()
 
     # Read the environment variable set by nsys_profiler.py
@@ -40,7 +47,7 @@ def main():
         print("Running PyTorch Profiler...")
         from torch.profiler import profile, ProfilerActivity
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-            result = mamba3_siso_combined(Q, K, V, ADT, DT, Simpson, Q_bias, K_bias, Angles)
+            result = mamba3_siso_combined(Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles)
             torch.cuda.synchronize()
     else:
         # NSYS mode: PyTorch Profiler is entirely bypassed
@@ -48,7 +55,7 @@ def main():
         torch.cuda.cudart().cudaProfilerStart()
         torch.cuda.nvtx.range_push("Mamba3_Fwd_Combined_Loop")
         
-        _ = mamba3_siso_combined(Q, K, V, ADT, DT, Simpson, Q_bias, K_bias, Angles)
+        _ = mamba3_siso_combined(Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles)
         torch.cuda.synchronize()
         
         torch.cuda.nvtx.range_pop()

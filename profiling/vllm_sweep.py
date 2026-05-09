@@ -16,6 +16,9 @@ from vllm import LLM, SamplingParams
 from vllm_profiler import mamba2_hf_overrides
 
 
+SIMAMBA_NATIVE_BACKEND = None
+
+
 GROUP_KEYS = (
     "model",
     "prefix_cache",
@@ -136,6 +139,95 @@ def gpu_memory_used_bytes(device):
     except Exception:
         free_bytes, total_bytes = torch.cuda.mem_get_info(device)
         return int(total_bytes - free_bytes), int(total_bytes)
+
+
+def profiling_hf_overrides(config):
+    config = mamba2_hf_overrides(config)
+    if getattr(config, "model_type", None) == "simamba":
+        ssm_cfg = getattr(config, "ssm_cfg", None)
+        chunk_size = ssm_cfg.get("chunk_size") if isinstance(ssm_cfg, dict) else None
+        if chunk_size is not None:
+            config.chunk_size = chunk_size
+            config.mamba_chunk_size = chunk_size
+        if not SIMAMBA_NATIVE_BACKEND:
+            return config
+        if isinstance(ssm_cfg, dict):
+            ssm_cfg["simamba_backend"] = SIMAMBA_NATIVE_BACKEND
+        elif ssm_cfg is not None:
+            setattr(ssm_cfg, "simamba_backend", SIMAMBA_NATIVE_BACKEND)
+    return config
+
+
+def _append_once(paths, value):
+    value = str(value)
+    if value not in paths:
+        paths.append(value)
+
+
+def _load_module_from_path(module_name, path):
+    import importlib
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load {module_name} from {path}")
+    module = importlib.util.module_from_spec(spec)
+    os.sys.modules[module_name] = module
+    parent_name, child_name = module_name.rsplit(".", 1)
+    parent = importlib.import_module(parent_name)
+    setattr(parent, child_name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+def enable_simamba_vllm_fork(fork_path):
+    fork_root = Path(fork_path).expanduser().resolve()
+    if not (fork_root / "vllm/model_executor/models/simamba.py").is_file():
+        raise FileNotFoundError(f"Missing Simamba vLLM model in fork: {fork_root}")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in os.sys.path:
+        os.sys.path.insert(0, str(repo_root))
+
+    fork_backends = fork_root / "vllm/v1/attention/backends"
+    backend_utils = _load_module_from_path(
+        "vllm.v1.attention.backends.utils", fork_backends / "utils.py"
+    )
+    _load_module_from_path(
+        "vllm.v1.attention.backends.mamba_attn",
+        fork_backends / "mamba_attn.py",
+    )
+    _load_module_from_path(
+        "vllm.v1.attention.backends.mamba2_attn",
+        fork_backends / "mamba2_attn.py",
+    )
+
+    import vllm.v1.attention.backends.registry as attention_registry
+    import vllm.model_executor.layers.mamba as mamba_pkg
+    import vllm.model_executor.layers.mamba.ops as ops_pkg
+    import vllm.model_executor.models.config as model_config_registry
+    import vllm.model_executor.models as models_pkg
+    from vllm.model_executor.models.registry import ModelRegistry
+
+    # The hpmls26 fork expects this constant; stock vLLM 0.16 lacks it.
+    if not hasattr(backend_utils, "NULL_BLOCK_ID"):
+        backend_utils.NULL_BLOCK_ID = 0
+
+    _append_once(models_pkg.__path__, fork_root / "vllm/model_executor/models")
+    _append_once(mamba_pkg.__path__, fork_root / "vllm/model_executor/layers/mamba")
+    _append_once(ops_pkg.__path__, fork_root / "vllm/model_executor/layers/mamba/ops")
+    attention_registry.MAMBA_TYPE_TO_BACKEND_MAP["simamba"] = (
+        attention_registry.MambaAttentionBackendEnum.MAMBA2.name
+    )
+
+    from vllm.model_executor.models.simamba import SimambaForCausalLM
+
+    SimambaForCausalLM.supports_mamba_prefix_caching = True
+    model_config_registry.MODELS_CONFIG_MAP["SimambaForCausalLM"] = (
+        model_config_registry.MambaModelConfig
+    )
+    ModelRegistry.register_model("SimambaForCausalLM", SimambaForCausalLM)
+    ModelRegistry.register_model("MambaLMHeadModel", SimambaForCausalLM)
 
 
 class GpuMemorySampler:
@@ -335,11 +427,13 @@ def plot_summary(summary_rows, out_path):
     ]
     plots = [
         ("ttft_sec_median", "Median TTFT (ms)", 1000.0),
+        ("prefill_probe_latency_sec_median", "Median prefill probe latency (ms)", 1000.0),
         ("tpot_sec_median", "Median TPOT (ms)", 1000.0),
-        ("tokens_per_sec_median", "Median tok/s", 1.0),
-        ("gpu_memory_peak_used_bytes_median", "Median GPU peak used (MiB)", 1.0 / (1024 ** 2)),
+        ("decode_tokens_per_sec_median", "Median decode tok/s", 1.0),
+        ("tokens_per_sec_median", "Median end-to-end tok/s", 1.0),
+        ("gpu_memory_peak_delta_bytes_median", "Median GPU peak delta (MiB)", 1.0 / (1024 ** 2)),
     ]
-    fig, axes = plt.subplots(2, 2, figsize=(14, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(18, 9))
     axes = axes.flatten()
     for ax, (metric, title, scale) in zip(axes, plots):
         values = [(as_float(row.get(metric)) or 0.0) * scale for row in ok_rows]
@@ -413,6 +507,9 @@ def main():
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--model-impl", default="auto")
     parser.add_argument("--force-transformers-backend-compatible", action="store_true")
+    parser.add_argument("--simamba-vllm-fork", default="")
+    parser.add_argument("--simamba-native-backend", default="triton")
+    parser.add_argument("--use-cudagraph", action="store_true")
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--prefill-probe-tokens", type=int, default=1)
@@ -424,7 +521,13 @@ def main():
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb-group", default="vllm_sweep")
     parser.add_argument("--wandb-name", default=None)
+    parser.add_argument("--allow-failures", action="store_true")
     args = parser.parse_args()
+
+    global SIMAMBA_NATIVE_BACKEND
+    if args.simamba_vllm_fork:
+        enable_simamba_vllm_fork(args.simamba_vllm_fork)
+        SIMAMBA_NATIVE_BACKEND = args.simamba_native_backend
 
     raw_rows = []
     root = Path(__file__).resolve().parent
@@ -454,12 +557,12 @@ def main():
                     tensor_parallel_size=args.tensor_parallel,
                     trust_remote_code=args.trust_remote_code,
                     model_impl=args.model_impl,
-                    enforce_eager=True,
+                    enforce_eager=not args.use_cudagraph,
                     max_model_len=args.max_model_len,
                     gpu_memory_utilization=args.gpu_memory_utilization,
                     max_num_seqs=max(parse_ints(args.batch_sizes)),
                     max_num_batched_tokens=args.max_model_len,
-                    hf_overrides=mamba2_hf_overrides,
+                    hf_overrides=profiling_hf_overrides,
                     enable_prefix_caching=(prefix_mode == "on"),
                     disable_log_stats=False,
                     **cache_kwargs,
@@ -578,6 +681,14 @@ def main():
             artifact.add_file(str(plot_path))
         run.log_artifact(artifact)
         wandb.finish()
+
+    failed_rows = [row for row in raw_rows if row.get("status") != "ok"]
+    ok_rows = [row for row in raw_rows if row.get("status") == "ok"]
+    if not args.allow_failures and (failed_rows or not ok_rows):
+        raise RuntimeError(
+            "vLLM sweep did not complete cleanly: "
+            f"{len(ok_rows)} ok rows, {len(failed_rows)} failed rows"
+        )
 
 
 if __name__ == "__main__":
