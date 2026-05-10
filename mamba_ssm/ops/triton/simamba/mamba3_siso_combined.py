@@ -291,6 +291,7 @@ class _SimambaFunction(torch.autograd.Function):
         chunk_size: int,
         recompute_chunk_size: int,
         return_final_states: bool,
+        use_improved_kernel: bool,
     ):
         try:
             triton.set_allocator(_triton_alloc_fn)
@@ -308,25 +309,49 @@ class _SimambaFunction(torch.autograd.Function):
                 Input_V_Prev2_State,
             )
 
-        out, *_, final_states = mamba3_siso_fwd(
-            Q=Q,
-            K=K,
-            V=V,
-            ADT=ADT,
-            DT=DT,
-            Simpson=Simpson,
-            Midpoint=Midpoint,
-            Q_bias=Q_bias,
-            K_bias=K_bias,
-            Angles=Angles,
-            D=D,
-            Z=Z,
-            Initial_States=Input_States,
-            chunk_size=chunk_size,
-            store_states_adt_outv=False,
-            return_final_states=return_final_states,
-            cu_seqlens=cu_seqlens,
-        )
+        if use_improved_kernel:
+            if Input_States is not None or return_final_states or cu_seqlens is not None:
+                raise NotImplementedError(
+                    "The improved Simamba training kernel only supports full-sequence no-state batches."
+                )
+            from mamba_ssm.ops.triton.simamba.improved_simamba_kernel import improved_simamba_siso_forward
+
+            out = improved_simamba_siso_forward(
+                Q=Q,
+                K=K,
+                V=V,
+                ADT=ADT,
+                DT=DT,
+                Simpson=Simpson,
+                Midpoint=Midpoint,
+                Q_bias=Q_bias,
+                K_bias=K_bias,
+                Angles=Angles,
+                D=D,
+                Z=Z,
+                chunk_size=chunk_size,
+            )
+            final_states = None
+        else:
+            out, *_, final_states = mamba3_siso_fwd(
+                Q=Q,
+                K=K,
+                V=V,
+                ADT=ADT,
+                DT=DT,
+                Simpson=Simpson,
+                Midpoint=Midpoint,
+                Q_bias=Q_bias,
+                K_bias=K_bias,
+                Angles=Angles,
+                D=D,
+                Z=Z,
+                Initial_States=Input_States,
+                chunk_size=chunk_size,
+                store_states_adt_outv=False,
+                return_final_states=return_final_states,
+                cu_seqlens=cu_seqlens,
+            )
 
         ctx.chunk_size = chunk_size
         ctx.recompute_chunk_size = recompute_chunk_size
@@ -602,6 +627,7 @@ class _SimambaFunction(torch.autograd.Function):
                 None,
                 None,
                 None,
+                None,
             )
 
         full_reference = ctx.return_final_states or ctx.has_input_states
@@ -670,6 +696,7 @@ class _SimambaFunction(torch.autograd.Function):
                 ref_grads.get("Input_K_Prev2_State"),
                 ref_grads.get("Input_V_Prev1_State"),
                 ref_grads.get("Input_V_Prev2_State"),
+                None,
                 None,
                 None,
                 None,
@@ -760,6 +787,7 @@ class _SimambaFunction(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -781,6 +809,7 @@ def mamba3_siso_combined(
     recompute_chunk_size: Optional[int] = None,
     return_final_states: bool = False,
     cu_seqlens: Optional[Tensor] = None,
+    use_improved_kernel: bool = False,
 ):
     batch, seqlen, nheads_qk, headdim_qk = Q.shape
     _, _, nheads, _ = V.shape
@@ -836,4 +865,5 @@ def mamba3_siso_combined(
         chunk_size,
         recompute_chunk_size,
         return_final_states,
+        use_improved_kernel,
     )

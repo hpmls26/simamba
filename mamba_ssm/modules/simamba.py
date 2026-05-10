@@ -24,7 +24,12 @@ from mamba_ssm.ops.triton.simamba.mamba3_siso_step import mamba3_siso_step as si
 
 SIMAMBA_BACKEND_REFERENCE = "reference"
 SIMAMBA_BACKEND_TRITON = "triton"
-SIMAMBA_SUPPORTED_BACKENDS = (SIMAMBA_BACKEND_REFERENCE, SIMAMBA_BACKEND_TRITON)
+SIMAMBA_BACKEND_IMPROVED = "improved"
+SIMAMBA_SUPPORTED_BACKENDS = (
+    SIMAMBA_BACKEND_REFERENCE,
+    SIMAMBA_BACKEND_TRITON,
+    SIMAMBA_BACKEND_IMPROVED,
+)
 SIMAMBA_DISCRETIZATION_SIMPSON = "simpson"
 SIMAMBA_DISCRETIZATION_TRAPEZOID = "trapezoid"
 SIMAMBA_SUPPORTED_DISCRETIZATIONS = (
@@ -438,6 +443,7 @@ class Simamba(nn.Module):
                 Initial_States=input_states,
                 return_final_states=input_states is not None,
                 cu_seqlens=cu_seqlens,
+                use_improved_kernel=self.simamba_backend == SIMAMBA_BACKEND_IMPROVED,
             )
             if ssm_state is not None:
                 y, last_angle, last_state, last_k1, last_k2, last_v1, last_v2 = y_tuple

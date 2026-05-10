@@ -226,6 +226,27 @@ python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-space
 ```
 
 
+## Profiling
+
+The profiling orchestrator regenerates the kernel and vLLM artifacts used for
+the Simamba report. It runs NSYS, NCU, and correctness for `mamba3`, `simamba`,
+and `improved` kernels, then runs the vLLM TTFT/TPOT/tok/s sweep for Mamba2
+and the improved Simamba export. Profiling logs to W&B project `profiling`;
+training logs still use `simamba`.
+
+```bash
+python profiling/run_all_profiling.py --wandb
+```
+
+Use `--dry-run` to print the underlying commands or `--steps` to run a subset,
+for example `--steps kernel-nsys,kernel-correctness,vllm`. If Nsight Compute
+reports `ERR_NVGPUCTRPERM`, rerun with `--sudo-ncu` on machines where sudo is
+configured for NCU. Outputs are written under `profiling/results/`, including
+kernel-suite CSV exports, correctness tables/plots, and vLLM comparison plots.
+Full reproducibility details are in [`REAMDE.md`](REAMDE.md#f-profiling), and
+profiler usage is in [`profiling/README.md`](profiling/README.md).
+
+
 ## Troubleshooting
 
 ### Precision

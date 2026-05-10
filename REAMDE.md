@@ -100,6 +100,16 @@ Lower validation loss is better. The central result is negative but reproducible
 │   ├── benchmark_simamba_siso.py
 │   ├── plot_simamba_benchmarks.py
 │   └── plots/
+├── profiling/
+│   ├── run_all_profiling.py            # One-command final profiling pipeline
+│   ├── nsys_kernel_profile.py          # Nsight Systems trace/export harness
+│   ├── ncu_kernel_profile.py           # Nsight Compute filtered-kernel harness
+│   ├── vllm_sweep.py                   # TTFT/TPOT/tok/s, GPU, prefill/decode profiling
+│   ├── vllm_combine_results.py         # Combined vLLM tables and matplotlib plot
+│   ├── kernel_correctness.py           # Triton-vs-PyTorch forward/backward checks
+│   ├── simamba/ and mamba3/            # Standalone SISO kernel profilers
+│   ├── test_kernel/                    # Improved fused Simamba prototype profiler
+│   └── results/                        # Local profiling traces, CSVs, and plots
 ├── data/                              # Local prepared SlimPajama memmaps
 ├── outputs/                           # Local training checkpoints and metrics
 ├── hf_exports/                        # Local Hugging Face export directories
@@ -129,9 +139,17 @@ python -m pip install -e '.[train,triton,causal-conv1d]' --no-build-isolation
 
 # Optional, for Mamba-3 benchmark dependencies:
 python -m pip install -e '.[mamba3]' --no-build-isolation
+
+# Optional, for the profiling reproduction in section F:
+python -m pip install vllm matplotlib wandb
 ```
 
 **System requirements:** Python 3.10+, CUDA-capable NVIDIA GPU, and at least 16 GB GPU memory for the reported 10M-parameter V100 experiments. The original A6000 target was unavailable, so final numbers are from a single V100. On this V100/Triton 3.2 environment, the original Mamba-3 path requiring `triton.language.make_tensor_descriptor` did not run directly.
+
+The profiling commands additionally require `nvidia-smi`, Nsight Systems
+(`nsys`), and Nsight Compute (`ncu`) on the machine running the traces. By
+default the profiler looks for the Nsight CLIs under `/usr/local/cuda/bin`;
+pass `--nsys-bin` or `--ncu-bin` if they are installed elsewhere.
 
 ### B. Experiment Tracking Dashboard
 
@@ -263,23 +281,54 @@ Regenerate the final paper plots and CSV summaries:
 
 ### F. Profiling
 
-Run the SISO benchmark harness:
+To regenerate all profiling artifacts, run the orchestrator from the repository
+root on a CUDA machine with Nsight Systems, Nsight Compute, vLLM, `nvidia-smi`,
+and W&B credentials available:
 
 ```bash
-.venv/bin/python benchmarks/benchmark_simamba_siso.py \
-  --mode all --batch 1 --prompt-len 128 --gen-len 64 \
-  --nheads 8 --headdim-qk 32 --headdim-v 32 \
-  --chunk-size 16 --dtype fp16 --warmup 5 --rep 20 \
-  --step-rep 50 --e2e-repeats 2
+python profiling/run_all_profiling.py --wandb
 ```
 
-Regenerate benchmark plots from the encoded measured values:
+The script runs:
 
-```bash
-.venv/bin/python benchmarks/plot_simamba_benchmarks.py
-```
+- NSYS traces for the `mamba3`, `simamba`, and `improved` SISO kernel targets.
+- NCU filtered-kernel profiles for the Mamba3, Simamba, and improved kernels.
+- Triton-vs-PyTorch correctness tables and a correctness error plot.
+- vLLM repeated measurements for `soumil1/mamba2-10m-slimpajama-500m` and the improved Simamba export.
+- A combined vLLM CSV/plot plus a W&B artifact bundle.
 
-The V100 benchmark attempt against the Mamba-3 path failed because this environment lacks `triton.language.make_tensor_descriptor`; the log is [`run_logs/benchmark_simamba_siso_v100_20260504.log`](run_logs/benchmark_simamba_siso_v100_20260504.log). The benchmark plot script contains the measured values used in the report figures.
+Profiling logs to W&B project `profiling`; training logs still use `simamba`.
+Use `--dry-run` to print the underlying commands, `--steps` to run a subset
+such as `--steps kernel-nsys,kernel-correctness,vllm`, and `--sudo-ncu` if NCU
+fails with `ERR_NVGPUCTRPERM` on a machine where sudo is configured.
+
+The main regenerated artifacts are:
+
+- `profiling/results/kernel_suite/nsys/*.nsys-rep`
+- `profiling/results/kernel_suite/nsys/csv_exports/*.csv`
+- `profiling/results/kernel_suite/ncu/*.csv`
+- `profiling/results/kernel_suite/ncu/*_details.txt`
+- `profiling/results/kernel_suite/kernel_correctness.csv`
+- `profiling/results/kernel_suite/kernel_correctness.md`
+- `profiling/results/kernel_suite/kernel_correctness.png`
+- `profiling/results/vllm_mamba2_summary.csv`
+- `profiling/results/vllm_mamba2_raw.csv`
+- `profiling/results/vllm_mamba2.png`
+- `profiling/results/vllm_improved_simamba_summary.csv`
+- `profiling/results/vllm_improved_simamba_raw.csv`
+- `profiling/results/vllm_improved_simamba.png`
+- `profiling/results/vllm_mamba2_vs_improved_summary.csv`
+- `profiling/results/vllm_mamba2_vs_improved_raw.csv`
+- `profiling/results/vllm_mamba2_vs_improved.png`
+
+The vLLM summaries include TTFT, TPOT, tok/s, decode-loop tok/s, prefill-probe
+latency, requests/s, GPU memory peak/delta, model-load memory delta, prefix
+caching on/off, and 512-token repeated-prefix prompts. Open `.nsys-rep` files
+in Nsight Systems, inspect NCU CSVs for per-kernel counters, and use the PNGs
+as report-ready matplotlib figures.
+
+The corresponding W&B project is
+[`ssb2234-columbia/profiling`](https://wandb.ai/ssb2234-columbia/profiling).
 
 ### G. Quickstart: Reproduce the Headline Result
 
