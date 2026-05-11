@@ -1,2 +1,0 @@
-Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Style,Range
-100.0,219722585,1,219722585.0,219722585.0,219722585,219722585,0.0,PushPop,Simamba_Fwd_Combined_Loop
