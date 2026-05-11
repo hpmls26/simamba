@@ -11,7 +11,7 @@
 - **Team Name:** Simamba
 - **Members:**
   - Soumil Baldota (ssb2234) - Simamba implementation, training pipeline, W&B/checkpointing, experiments, and artifact generation
-  - Ansen Shia (as8008) - vLLM integration, experiment design, analysis, report, and presentation
+  - Ansen Shia (as8008) - vLLM integration[`hpml26/vllm`](https://github.com/hpmls26/vllm), experiment design, analysis, report, and presentation
   - David Zhang (dwz2107) - baselines, result analysis, report, and presentation
 
 ## Submission
