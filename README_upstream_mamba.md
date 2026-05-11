@@ -1,0 +1,442 @@
+# Mamba
+
+![Mamba](assets/selection.png "Selective State Space")
+> **Mamba: Linear-Time Sequence Modeling with Selective State Spaces**\
+> Albert Gu*, Tri Dao*\
+> Paper: https://arxiv.org/abs/2312.00752
+
+![Mamba-2](assets/ssd_algorithm.png "State Space Dual Model")
+> **Transformers are SSMs: Generalized Models and Efficient Algorithms**\
+>     **Through Structured State Space Duality**\
+> Tri Dao*, Albert Gu*\
+> Paper: https://arxiv.org/abs/2405.21060
+
+![Mamba-3](assets/mamba3.png "Inference-first State Space Model")
+> **Mamba-3: Improved Sequence Modeling using State Space Principles**\
+>     **Through Structured State Space Duality**\
+> Aakash Lahoti*, Kevin Y. Li*, Berlin Chen*, Caitlin Wang*, Aviv Bick, J. Zico Kolter, Tri Dao†, Albert Gu†\
+> Paper: https://arxiv.org/abs/2603.15569
+
+## About
+
+Mamba is a new state space model architecture showing promising performance on information-dense data such as language modeling, where previous subquadratic models fall short of Transformers.
+It is based on the line of progress on [structured state space models](https://github.com/state-spaces/s4),
+with an efficient hardware-aware design and implementation in the spirit of [FlashAttention](https://github.com/Dao-AILab/flash-attention).
+
+## Installation
+
+Install PyTorch first, then:
+- `pip install mamba-ssm --no-build-isolation`: the core package with the common Python dependencies only.
+- `pip install mamba-ssm[causal-conv1d] --no-build-isolation`: core package plus optional `causal-conv1d`.
+- `pip install mamba-ssm[triton] --no-build-isolation`: core package plus Triton kernels.
+- `pip install mamba-ssm[mamba3] --no-build-isolation`: core package plus the extra dependencies required for Mamba-3 kernels.
+- `pip install mamba-ssm[full] --no-build-isolation`: install all optional runtime extras.
+
+`--no-build-isolation` is required so that pip uses your existing CUDA-enabled PyTorch instead of installing torch-cpu in an isolated build environment.
+
+NOTE: To use Mamba-3, please install from source `MAMBA_FORCE_BUILD=TRUE pip install --no-cache-dir --force-reinstall git+https://github.com/state-spaces/mamba.git --no-build-isolation`.
+
+If you are packaging from a local checkout for environments like Google Colab, the base package can now be installed without requiring `triton`, `tilelang`, `quack-kernels`, or `causal-conv1d` up front. Those packages are imported only by the corresponding optional code paths.
+
+Other requirements:
+- Linux
+- NVIDIA GPU
+- PyTorch 1.12+
+- CUDA 11.6+
+
+For AMD cards, see additional prerequisites below.
+
+## Usage
+
+We expose several levels of interface with the Mamba model.
+
+### Selective SSM
+
+Mamba is based on a selective SSM layer, which is the focus of the paper (Section 3; Algorithm 2).
+
+Source: [ops/selective_scan_interface.py](mamba_ssm/ops/selective_scan_interface.py).
+
+### Mamba Block
+
+The main module of this repository is the Mamba architecture block wrapping the selective SSM.
+
+Source: [modules/mamba_simple.py](mamba_ssm/modules/mamba_simple.py).
+
+Usage:
+``` python
+import torch
+from mamba_ssm import Mamba
+
+batch, length, dim = 2, 64, 16
+x = torch.randn(batch, length, dim).to("cuda")
+model = Mamba(
+    # This module uses roughly 3 * expand * d_model^2 parameters
+    d_model=dim, # Model dimension d_model
+    d_state=16,  # SSM state expansion factor
+    d_conv=4,    # Local convolution width
+    expand=2,    # Block expansion factor
+).to("cuda")
+y = model(x)
+assert y.shape == x.shape
+```
+
+### Mamba-2
+
+The Mamba-2 block is implemented at [modules/mamba2.py](mamba_ssm/modules/mamba2.py).
+
+A simpler version is at [modules/mamba2_simple.py](mamba_ssm/modules/mamba2_simple.py)
+
+The usage is similar to Mamba(-1):
+``` python
+from mamba_ssm import Mamba2
+model = Mamba2(
+    # This module uses roughly 3 * expand * d_model^2 parameters
+    d_model=dim, # Model dimension d_model
+    d_state=64,  # SSM state expansion factor, typically 64 or 128
+    d_conv=4,    # Local convolution width
+    expand=2,    # Block expansion factor
+).to("cuda")
+y = model(x)
+assert y.shape == x.shape
+```
+
+#### SSD
+
+A minimal version of the inner SSD module (Listing 1 from the Mamba-2 paper) with conversion between "discrete" and "continuous" SSM versions
+is at [modules/ssd_minimal.py](mamba_ssm/modules/ssd_minimal.py).
+
+### Mamba-3
+
+The Mamba-3 block is implemented at [modules/mamba3.py](mamba_ssm/modules/mamba3.py).
+
+The usage is as follows:
+``` python
+from mamba_ssm import Mamba3
+batch, length, dim = 2, 2048, 768
+x = torch.randn(batch, length, dim).to(torch.bfloat16).to("cuda")
+model = Mamba3(
+    # This module uses roughly 6 * d_model^2 parameters
+    d_model=dim, # Model dimension d_model
+    d_state=128,  # SSM state size
+    headdim=64, # SSM headdim
+    is_mimo=True, # Use MIMO mode
+    mimo_rank=4, # MIMO rank when is_mimo=True
+    chunk_size=16, # 64/mimo_rank if x is in bf16, else 32/mimo_rank
+    is_outproj_norm=False, # Additional post SSM norm
+    dtype=torch.bfloat16,
+).to("cuda")
+y = model(x)
+assert y.shape == x.shape
+```
+
+### Mamba Language Model
+
+Finally, we provide an example of a complete language model: a deep sequence model backbone (with repeating Mamba blocks) + language model head.
+
+Source: [models/mixer_seq_simple.py](mamba_ssm/models/mixer_seq_simple.py).
+
+This is an example of how to integrate Mamba into an end-to-end neural network.
+This example is used in the generation scripts below.
+
+
+## Pretrained Models
+
+Pretrained models are uploaded to
+[Hugging Face](https://huggingface.co/state-spaces): `mamba-130m`, `mamba-370m`,
+`mamba-790m`, `mamba-1.4b`, `mamba-2.8b`, `mamba2-130m`, `mamba2-370m`,
+`mamba2-780m`, `mamba2-1.3b`, `mamba2-2.7b`, `transformerpp-2.7b`, `mamba2attn-2.7b`, trained on 300B tokens on the Pile, as well as `mamba-2.8b-slimpj`
+(trained on 600B tokens on the SlimPajama dataset).
+
+
+The models will be autodownloaded by the generation script below.
+
+These models were trained on the [Pile](https://huggingface.co/datasets/EleutherAI/pile), and follow the standard model dimensions described by GPT-3 and followed by many open source models:
+
+| Parameters | Layers | Model dim. | 
+|------------|--------|------------|
+| 130M       | 24     | 768        |
+| 370M       | 48     | 1024       |
+| 790M       | 48     | 1536       |
+| 1.4B       | 48     | 2048       |
+| 2.8B       | 64     | 2560       |
+
+(The layer count of Mamba doubles that of a Transformer with similar size, as two Mamba blocks are needed for each "layer" (MHA block + MLP block) of a Transformer.)
+
+Note: these are base models trained only for 300B tokens, without any form of downstream modification (instruction tuning, etc.).
+Performance is expected to be comparable or better than other architectures trained on similar data, but not to match larger or fine-tuned models.
+
+
+## Evaluations
+
+To run zero-shot evaluations of models (corresponding to Table 3 of the paper),
+we use the
+[lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
+library.
+
+1. Install `lm-evaluation-harness` by `pip install lm-eval==0.4.2`.
+2. Run evaluation with (more documentation at the [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness/tree/big-refactor) repo):
+``` sh
+lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba-130m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
+python evals/lm_harness_eval.py --model hf --model_args pretrained=EleutherAI/pythia-160m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande --device cuda --batch_size 64
+```
+
+To reproduce the results on the `mamba-2.8b-slimpj` model reported in the blogposts:
+``` sh
+lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks boolq,piqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa,race,truthfulqa_mc2 --device cuda --batch_size 256
+lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks mmlu --num_fewshot 5 --device cuda --batch_size 256
+```
+
+To run evaluations on Mamba-2 models, simply replace the model names:
+``` sh
+lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba2-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
+lm_eval --model mamba_ssm --model_args pretrained=state-spaces/transformerpp-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
+lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba2attn-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
+```
+
+Note that the result of each task might differ from reported values by 0.1-0.3 due to noise in the evaluation process.
+
+## Inference
+
+The script [benchmarks/benchmark_generation_mamba_simple.py](benchmarks/benchmark_generation_mamba_simple.py)
+1. autoloads a model from the Hugging Face Hub,
+2. generates completions of a user-specified prompt,
+3. benchmarks the inference speed of this generation.
+
+Other configurable options include the top-p (nucleus sampling) probability, and the softmax temperature.
+
+### Examples
+
+To test generation latency (e.g. batch size = 1) with different sampling strategies:
+
+``` sh
+python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
+python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
+python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --minp 0.05 --topk 0 --temperature 0.7 --repetition-penalty 1.2
+```
+
+To test generation throughput with random prompts (e.g. large batch size):
+``` sh
+python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --batch 64
+python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --batch 64
+```
+
+With Mamba-2, you just need to change the model name:
+``` sh
+python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba2-2.7b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
+```
+
+
+## Profiling
+
+The profiling orchestrator regenerates the kernel and vLLM artifacts used for
+the Simamba report. It runs NSYS, NCU, and correctness for `mamba3`, `simamba`,
+and `improved` kernels, then runs the vLLM TTFT/TPOT/tok/s sweep for Mamba2
+and the improved Simamba export. Profiling logs to W&B project `profiling`;
+training logs still use `simamba`.
+
+```bash
+python profiling/run_all_profiling.py --wandb
+```
+
+Use `--dry-run` to print the underlying commands or `--steps` to run a subset,
+for example `--steps kernel-nsys,kernel-correctness,vllm`. If Nsight Compute
+reports `ERR_NVGPUCTRPERM`, rerun with `--sudo-ncu` on machines where sudo is
+configured for NCU. Outputs are written under `profiling/results/`, including
+kernel-suite CSV exports, correctness tables/plots, and vLLM comparison plots.
+Full reproducibility details are in [`README.md`](README.md#f-profiling), and
+profiler usage is in [`profiling/README.md`](profiling/README.md).
+
+
+## Troubleshooting
+
+### Precision
+Our models were trained using PyTorch [AMP](https://pytorch.org/docs/stable/amp.html) for mixed precision. AMP keeps model parameters in float32 and casts to half precision when necessary.
+On the other hand, other frameworks like DeepSpeed store parameters in float16 and upcasts when necessary (e.g. for optimizer accumulation).
+
+We've observed that higher precision for the main model parameters may be necessary, because SSMs are sensitive to their recurrent dynamics. If you are experiencing instabilities,
+as a first step please try a framework storing parameters in fp32 (such as AMP).
+
+### Initialization
+Some parts of the model have initializations inherited from prior work on S4 models.
+For [example](https://github.com/state-spaces/mamba/blob/f0affcf69f06d1d06cef018ff640bf080a11c421/mamba_ssm/modules/mamba_simple.py#L102), the $\Delta$ parameter has a targeted range by initializing the bias of its linear projection.
+However, some frameworks may have post-initialization hooks (e.g. setting all bias terms in `nn.Linear` modules to zero).
+If this is the case, you may have to add custom logic (e.g. this [line](https://github.com/state-spaces/mamba/blob/f0affcf69f06d1d06cef018ff640bf080a11c421/mamba_ssm/modules/mamba_simple.py#L104) turns off re-initializing in our trainer, but would be a no-op in any other framework)
+that is specific to the training framework.
+
+## Additional Prerequisites for AMD cards
+
+### Patching ROCm
+
+If you are on ROCm 6.0, run the following steps to avoid errors during compilation. This is not required for ROCm 6.1 onwards.
+
+1. Locate your ROCm installation directory. This is typically found at `/opt/rocm/`, but may vary depending on your installation.
+
+2. Apply the Patch. Run with `sudo` in case you encounter permission issues.
+   ```bash
+    patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h < rocm_patch/rocm6_0.patch 
+   ```
+
+
+## Citation
+
+If you use this codebase, or otherwise find our work valuable, please cite Mamba:
+```
+@article{mamba,
+  title={Mamba: Linear-Time Sequence Modeling with Selective State Spaces},
+  author={Gu, Albert and Dao, Tri},
+  journal={arXiv preprint arXiv:2312.00752},
+  year={2023}
+}
+
+@inproceedings{mamba2,
+  title={Transformers are {SSM}s: Generalized Models and Efficient Algorithms Through Structured State Space Duality},
+  author={Dao, Tri and Gu, Albert},
+  booktitle={International Conference on Machine Learning (ICML)},
+  year={2024}
+}
+
+@misc{lahoti2026mamba3improvedsequencemodeling,
+      title={Mamba-3: Improved Sequence Modeling using State Space Principles}, 
+      author={Aakash Lahoti and Kevin Y. Li and Berlin Chen and Caitlin Wang and Aviv Bick and J. Zico Kolter and Tri Dao and Albert Gu},
+      year={2026},
+      eprint={2603.15569},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2603.15569}, 
+}
+```
+
+
+###
+
+1. Start a CPU job to prepare the bounded SlimPajama sample
+
+  mkdir -p /insomnia001/home/ssb2234/logs
+  cd /insomnia001/home/ssb2234/mamba
+  sbatch scripts/prepare_slimpajama_smoke.sh
+
+  Watch logs:
+
+  tail -f /insomnia001/home/ssb2234/logs/SlimPajamaPrepSmoke-<jobid>.out
+  tail -f /insomnia001/home/ssb2234/logs/SlimPajamaPrepSmoke-<jobid>.err
+
+  This writes:
+
+  - /insomnia001/home/ssb2234/slimpajama_smoke/train.bin
+  - /insomnia001/home/ssb2234/slimpajama_smoke/val.bin
+  - /insomnia001/home/ssb2234/slimpajama_smoke/meta.json
+
+  If datasets is missing or outdated in the venv, do this once before submitting:
+
+  cd /insomnia001/home/ssb2234/mamba
+  source .venv/bin/activate
+  pip install -U datasets huggingface_hub hf-xet tqdm
+
+  2. After dataset prep finishes, submit the smoke comparison job
+
+  cd /insomnia001/home/ssb2234/mamba
+  sbatch scripts/run_compare_smoke_a6000.sh
+
+  Watch logs:
+
+  tail -f /insomnia001/home/ssb2234/logs/SimambaSmokeCompare-<jobid>.out
+  tail -f /insomnia001/home/ssb2234/logs/SimambaSmokeCompare-<jobid>.err
+
+  This runs sequential smoke tests for:
+
+  - Simamba
+  - Mamba2
+  - Mamba3
+
+  and writes outputs under:
+
+  - /insomnia001/home/ssb2234/simamba_compare_smoke
+
+  3. Make sure W&B env is available in the batch environment
+  Because batch jobs don’t always inherit shell state the way you expect, either:
+
+  - export the vars before sbatch, if your cluster propagates them
+  - or put them in the script itself, which you said you already did for the training launcher
+
+  The minimal required vars are:
+
+  export WANDB_API_KEY='...'
+  export WANDB_ENTITY='ssb2234-columbia'
+  export WANDB_PROJECT='simamba'
+
+  If you want to pass them explicitly when submitting:
+
+  export WANDB_API_KEY='...'
+  export WANDB_ENTITY='ssb2234-columbia'
+  export WANDB_PROJECT='simamba'
+  sbatch --export=ALL scripts/run_compare_smoke_a6000.sh
+
+  4. If you want to run the prep interactively instead of through sbatch
+
+  srun --pty -p short -c 2 --mem-per-cpu=4G -t 0-02:00 -A edu /bin/bash
+  cd /insomnia001/home/ssb2234/mamba
+  source .venv/bin/activate
+  bash scripts/prepare_slimpajama_smoke.sh
+
+  5. If you want to run the comparison interactively instead of through sbatch
+
+  srun --pty -p short --gres=gpu:1 -c 4 --mem-per-cpu=8G -t 0-06:00 -A edu /bin/bash
+  cd /insomnia001/home/ssb2234/mamba
+  source .venv/bin/activate
+  export WANDB_API_KEY='...'
+  export WANDB_ENTITY='ssb2234-columbia'
+  export WANDB_PROJECT='simamba'
+  bash scripts/run_compare_smoke_a6000.sh
+
+  Expected order
+
+  1. sbatch scripts/prepare_slimpajama_smoke.sh
+  2. wait for train.bin and val.bin
+  3. sbatch scripts/run_compare_smoke_a6000.sh
+
+  If you want, I can also give you a single copy-paste block that submits prep first, waits for it, then submits the
+  GPU smoke run
+  automatically.
+
+## 130M training with async GCS checkpoint export
+
+The long-running launcher is:
+
+```bash
+scripts/run_train_simamba_130m.sh
+```
+
+It now validates that the visible GPUs match `A6000`, writes W&B scratch files under the training output directory instead of the repo root, and saves model-only milestone checkpoints every 25 steps for asynchronous export.
+At `SEQ_LEN=2048`, it defaults to `MICRO_BATCH_SIZE=1` and keeps `GLOBAL_BATCH_SIZE=32` via gradient accumulation because the current Simamba backward path is activation-heavy and can OOM with a local microbatch of 4 on 48 GiB A6000 GPUs.
+
+Before submitting, make sure these variables are available in the batch environment:
+
+```bash
+export WANDB_API_KEY='...'
+export WANDB_ENTITY='ssb2234-columbia'
+export WANDB_PROJECT='simamba'
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json  # if needed
+export GCS_BUCKET=<bucket-name>
+```
+
+Then submit:
+
+```bash
+sbatch --export=ALL scripts/run_train_simamba_130m.sh /path/train.bin /path/val.bin /path/output_dir
+```
+
+If you want to override the default batch shape, do it explicitly in the submit environment. For example:
+
+```bash
+MICRO_BATCH_SIZE=1 GLOBAL_BATCH_SIZE=32 sbatch --export=ALL scripts/run_train_simamba_130m.sh /path/train.bin /path/val.bin /path/output_dir
+```
+
+Notes:
+
+- The async exporter uploads `step_*` milestone archives to `GCS_PREFIX/GCS_RUN_PREFIX/checkpoints` in the configured bucket.
+- `GCS_RUN_PREFIX` defaults to `$(basename OUTPUT_DIR)` and can be overridden explicitly.
+- `GCS_PREFIX` is optional and lets you place runs under a shared object prefix.
+- If `OUTPUT_DIR/latest/trainer.pt` is missing at startup and `GCS_RESTORE_IF_MISSING=1`, the launcher synchronously restores the newest uploaded `step_*.tar` milestone from GCS into `OUTPUT_DIR/latest` before training starts.
+- That remote restore brings back model weights and step number, but not optimizer state, because exported `step_*` milestones are model-only.
+- The uploader uses resumable GCS session URIs and persists session state locally so interrupted uploads can continue without restarting the whole archive transfer.
+- If you need to disable remote export for a one-off run, set `GCS_EXPORT=0`.
