@@ -22,8 +22,7 @@
 - **Experiment-tracking dashboard:** [Weights & Biases project](https://wandb.ai/ssb2234-columbia/simamba)
 - **Exported checkpoints:** [Simamba midpoint 10M](https://huggingface.co/soumil1/simamba-midpoint-10m-slimpajama-500m) and [Mamba2 10M](https://huggingface.co/soumil1/mamba2-10m-slimpajama-500m)
 
-This workspace contains the report source and generated paper assets. No compiled PDF or PPTX was present in the repository at the time this README was completed, so the CourseWorks upload should use a compiled version of `docs/paper.tex` and the final slide deck if maintained outside the repo.
-
+The final report PDF and the presentation file are checked into the `deliverables/` folder of this repository **and** uploaded to Courseworks.
 ---
 
 ## 1. Problem Statement
