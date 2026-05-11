@@ -17,7 +17,7 @@
 ## Submission
 
 - **GitHub repository:** [https://github.com/hpmls26/simamba](https://github.com/hpmls26/simamba)
-- **Final report source:** [`deliverables/HPML_Final_Report.pdf`](deliverablerables/HPML_Final_Report.pdf) and extended experiment report [`docs/hpml_simamba_report.md`](docs/hpml_simamba_report.md)
+- **Final report source:** [`deliverables/HPML_Final_Report.pdf`](deliverablerables/HPML_Final_Report.pdf)
 - **Final presentation materials:** [`deliverables/HPML_Final_Presentation.pptx`](deliverablerables/HPML_Final_Presentation.pptx)
 - **Experiment-tracking dashboard:** [Weights & Biases project](https://wandb.ai/ssb2234-columbia/simamba)
 - **Exported checkpoints:** [Simamba midpoint 10M](https://huggingface.co/soumil1/simamba-midpoint-10m-slimpajama-500m) and [Mamba2 10M](https://huggingface.co/soumil1/mamba2-10m-slimpajama-500m)
