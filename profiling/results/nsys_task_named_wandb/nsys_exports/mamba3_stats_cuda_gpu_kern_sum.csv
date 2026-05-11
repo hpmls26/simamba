@@ -1,4 +1,0 @@
-Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
-82.5,235807,1,235807.0,235807.0,235807,235807,0.0,mamba3_siso_fwd_kernel
-12.8,36480,5,7296.0,9376.0,2208,9888,3384.0,"void at::native::vectorized_elementwise_kernel<(int)4, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
-4.7,13440,1,13440.0,13440.0,13440,13440,0.0,angle_dt_fwd_kernel

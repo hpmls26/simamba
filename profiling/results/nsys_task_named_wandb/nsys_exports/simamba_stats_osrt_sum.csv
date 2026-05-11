@@ -1,3 +1,0 @@
-Time (%),Total Time (ns),Num Calls,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
-99.3,200393092,2,100196546.0,100196546.0,100162287,100230805,48449.5,poll
-0.7,1352821,40672,33.3,33.0,20,12162,91.1,pthread_cond_signal
