@@ -23,6 +23,7 @@
 - **Exported checkpoints:** [Simamba midpoint 10M](https://huggingface.co/soumil1/simamba-midpoint-10m-slimpajama-500m) and [Mamba2 10M](https://huggingface.co/soumil1/mamba2-10m-slimpajama-500m)
 
 The final report PDF and the presentation file are checked into the `deliverables/` folder of this repository **and** uploaded to Courseworks.
+
 ---
 
 ## 1. Problem Statement
