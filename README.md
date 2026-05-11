@@ -17,18 +17,19 @@
 ## Submission
 
 - **GitHub repository:** [https://github.com/hpmls26/simamba](https://github.com/hpmls26/simamba)
-- **Final report source:** [`deliverables/HPML_Final_Report.pdf`](deliverablerables/HPML_Final_Report.pdf)
-- **Final presentation materials:** [`deliverables/HPML_Final_Presentation.pptx`](deliverablerables/HPML_Final_Presentation.pptx)
-- **Experiment-tracking dashboard:** [Weights & Biases project](https://wandb.ai/ssb2234-columbia/simamba)
+- **Final report:** [`deliverables/HPML_Final_Project_Report.pdf`](deliverables/HPML_Final_Project_Report.pdf)
+- **Final presentation:** [`deliverables/HPML_Final_Presentation.pptx`](deliverables/HPML_Final_Presentation.pptx)
+- **Experiment-tracking dashboard:** [Weights & Biases training project](https://wandb.ai/ssb2234-columbia/simamba)
+- **Profiling dashboard:** [Weights & Biases profiling project](https://wandb.ai/ssb2234-columbia/profiling)
 - **Exported checkpoints:** [Simamba midpoint 10M](https://huggingface.co/soumil1/simamba-midpoint-10m-slimpajama-500m) and [Mamba2 10M](https://huggingface.co/soumil1/mamba2-10m-slimpajama-500m)
 
-The final report PDF and the presentation file are checked into the `deliverables/` folder of this repository **and** uploaded to Courseworks.
+The final report PDF and the presentation file are checked into the `deliverables/` folder of this repository **and** uploaded to CourseWorks.
 
 ---
 
 ## 1. Problem Statement
 
-This project evaluates whether a Simpson-style discretization can improve the SISO state recurrence used by Mamba-3-style language-model mixers. The target workload is language-model training on SlimPajama, with supporting inference/kernel benchmarking to understand whether the new recurrence is practical. The main bottlenecks are optimization stability in recurrent SSM dynamics and GPU efficiency, especially prefill throughput and memory traffic in the current Simamba implementation.
+This project evaluates whether a Simpson-style discretization can improve the SISO state recurrence used by Mamba-3-style language-model mixers. The target workload is language-model training on SlimPajama, with supporting inference and kernel benchmarking to understand whether the new recurrence is practical. The optimization scope is **both training and inference**: training bottlenecks are recurrent-state optimization stability and gradient health, while inference bottlenecks are prefill throughput, memory traffic, and vLLM cache behavior.
 
 ---
 
@@ -50,7 +51,7 @@ This project evaluates whether a Simpson-style discretization can improve the SI
 
 The central result is negative but reproducible: the current Simpson parameterization trains stably, but it does not beat the matched trapezoid baseline or Mamba2. While it does not yet outperform, the approach remains competitive across both long-run training and controlled ablations. Simpson variants also exhibit a distinct optimization profile, with slower convergence, larger gradient norms, and additional stabilization requirements such as coefficient offsets and midpoint control, suggesting that future potential work in parameterization or optimization may better realize the potential of higher-order recurrence methods.
 
-| Metric | Baseline | Simamba / Proposed Variant | Delta |
+| Metric | Baseline | Optimized / Proposed Variant | Delta (Improvement) |
 | --- | ---: | ---: | ---: |
 | 500M-token best validation loss | Mamba2: 4.8625 | Simamba midpoint: 4.9178 | +0.0552 worse |
 | 500M-token matched trapezoid validation loss | Simamba trapezoid: 4.9326 | Simamba default Simpson: 4.9319 best, 4.9671 final | best roughly tied; final worse |
@@ -73,48 +74,32 @@ The central result is negative but reproducible: the current Simpson parameteriz
 
 ```text
 .
-├── README.md                         # Upstream Mamba README
-├── REAMDE.md                         # HPML submission README
-├── LICENSE                           # Apache-2.0
-├── pyproject.toml / setup.py          # Package and optional dependency metadata
-├── docs/
-│   ├── paper.tex                      # Final paper source
-│   ├── hpml_simamba_report.md         # Extended run report used to complete this README
-│   └── assets/paper/                  # Generated plots, CSV summaries, and architecture figure
-├── mamba_ssm/
-│   ├── modules/simamba.py             # Simamba mixer and local-conv/discretization controls
-│   ├── modules/mamba2.py              # Mamba2 compatibility fixes and d_conv controls
-│   └── ops/triton/simamba/            # Simamba SISO reference/Triton kernels
-├── scripts/
-│   ├── prepare_slimpajama.py          # Streaming tokenization into uint16 memmaps
-│   ├── train_simamba_lm.py            # Main LM training/eval/checkpoint loop
-│   ├── run_10m_discretization_comparison_500m.sh
-│   ├── run_followup_ablation_50m_after_current.sh
-│   ├── run_simamba_localconv_50m.sh
-│   ├── train_state_tracking.py
-│   ├── eval_checkpoint_compression.py
-│   ├── generate_hpml_paper_assets.py
-│   ├── convert_mamba2_checkpoint_to_vllm_hf.py
-│   └── push_best_simamba_to_hf.py
-├── benchmarks/
-│   ├── benchmark_simamba_siso.py
-│   ├── plot_simamba_benchmarks.py
-│   └── plots/
-├── profiling/
-│   ├── run_all_profiling.py            # One-command final profiling pipeline
-│   ├── nsys_kernel_profile.py          # Nsight Systems trace/export harness
-│   ├── ncu_kernel_profile.py           # Nsight Compute filtered-kernel harness
-│   ├── vllm_sweep.py                   # TTFT/TPOT/tok/s, GPU, prefill/decode profiling
-│   ├── vllm_combine_results.py         # Combined vLLM tables and matplotlib plot
-│   ├── kernel_correctness.py           # Triton-vs-PyTorch forward/backward checks
-│   ├── simamba/ and mamba3/            # Standalone SISO kernel profilers
-│   ├── test_kernel/                    # Improved fused Simamba prototype profiler
-│   └── results/                        # Local profiling traces, CSVs, and plots
-├── data/                              # Local prepared SlimPajama memmaps
-├── outputs/                           # Local training checkpoints and metrics
-├── hf_exports/                        # Local Hugging Face export directories
-├── run_logs/                          # JSONL-style logs and evaluation summaries
-└── wandb/                             # Local W&B run files
++-- README.md                         # HPML submission README
++-- README_upstream_mamba.md          # Preserved upstream Mamba README
++-- LICENSE                           # Apache-2.0
++-- pyproject.toml / setup.py          # Package metadata and pinned HPML extra
++-- deliverables/
+|   +-- HPML_Final_Project_Report.pdf
+|   +-- HPML_Final_Presentation.pptx
++-- docs/
+|   +-- paper.tex                      # Final paper source
+|   +-- hpml_simamba_report.md         # Extended experiment report
+|   +-- assets/paper/                  # Generated plots, CSV summaries, and figures
++-- mamba_ssm/
+|   +-- modules/simamba.py             # Simamba mixer and controls
+|   +-- modules/mamba2.py              # Mamba2 compatibility and local-conv controls
+|   +-- ops/triton/simamba/            # Simamba SISO reference/Triton kernels
++-- scripts/
+|   +-- prepare_slimpajama.py          # Dataset preprocessing
+|   +-- train_simamba_lm.py            # Training entry point
+|   +-- eval_checkpoint_compression.py # Evaluation/compression entry point
+|   +-- generate_hpml_paper_assets.py  # Figure/table generation
++-- benchmarks/                        # SISO benchmark scripts and plots
++-- profiling/                         # NSYS/NCU/vLLM profiling harnesses
++-- data/                              # Local dataset memmaps; ignored by git
++-- outputs/                           # Local checkpoints; ignored by git
++-- run_logs/                          # Local logs; ignored by git
++-- wandb/                             # Local W&B files; ignored by git
 ```
 
 ---
@@ -123,11 +108,9 @@ The central result is negative but reproducible: the current Simpson parameteriz
 
 ### A. Environment Setup
 
-To preface, this project was forked from the Mamba repository, which uses a pyproject.toml based setup instead of a requirements.txt or environment.yml. We followed the same approach here.
-
 ```bash
 # Clone
-git clone git@github.com:hpmls26/simamba.git
+git clone https://github.com/hpmls26/simamba.git
 cd simamba
 
 # Create a clean Python environment
@@ -135,18 +118,12 @@ python3.10 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip wheel setuptools packaging ninja
 
-# Install CUDA-enabled PyTorch for your machine first, then install this repo.
-# The local run used torch 2.6.0+cu124.
-python -m pip install -e '.[train,triton,causal-conv1d]' --no-build-isolation
-
-# Optional, for Mamba-3 benchmark dependencies:
-python -m pip install -e '.[mamba3]' --no-build-isolation
-
-# Optional, for the profiling reproduction in section F:
-python -m pip install vllm matplotlib wandb
+# Install the pinned HPML V100/CUDA 12.4 environment from pyproject.toml.
+python -m pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+  -e '.[hpml-v100]' --no-build-isolation
 ```
 
-**System requirements:** Python 3.10+, CUDA-capable NVIDIA GPU, and at least 16 GB GPU memory for the reported 10M-parameter V100 experiments. The original A6000 target was unavailable, so final numbers are from a single V100. On this V100/Triton 3.2 environment, the original Mamba-3 path requiring `triton.language.make_tensor_descriptor` did not run directly.
+**System requirements:** Python 3.10+, CUDA-capable NVIDIA GPU, and at least 16 GB GPU memory for the reported 10M-parameter V100 experiments. The pinned experiment environment is the `hpml-v100` optional dependency group in `pyproject.toml`. The original A6000 target was unavailable, so final numbers are from a single V100. On this V100/Triton 3.2 environment, the original Mamba-3 path requiring `triton.language.make_tensor_descriptor` did not run directly.
 
 The profiling commands additionally require `nvidia-smi`, Nsight Systems
 (`nsys`), and Nsight Compute (`ncu`) on the machine running the traces. By
@@ -160,6 +137,8 @@ Public experiment tracking is under:
 > **Dashboard:** [https://wandb.ai/ssb2234-columbia/simamba](https://wandb.ai/ssb2234-columbia/simamba)
 >
 > **Platform used:** Weights & Biases
+
+The separate profiling dashboard is [https://wandb.ai/ssb2234-columbia/profiling](https://wandb.ai/ssb2234-columbia/profiling).
 
 Key W&B runs:
 
@@ -176,7 +155,7 @@ Key W&B runs:
 | Local-conv Simpson default | https://wandb.ai/ssb2234-columbia/simamba/runs/eglr4x75 |
 | Local-conv Simpson low-control | https://wandb.ai/ssb2234-columbia/simamba/runs/w6u32odi |
 
-Local W&B-derived summaries are committed/generated under [`docs/assets/paper/run_summary.csv`](docs/assets/paper/run_summary.csv), [`docs/assets/paper/run_events.csv`](docs/assets/paper/run_events.csv), and [`docs/assets/paper/wandb_local_history.csv`](docs/assets/paper/wandb_local_history.csv).
+The dashboard contains tagged baseline and Simamba runs with model configuration, training/validation curves, gradient norms, learning rate, throughput, GPU memory where available, profiling summaries, ablation metadata, and run tags separating baseline, Simpson, midpoint, trapezoid, and local-conv variants. Local W&B-derived summaries are committed/generated under [`docs/assets/paper/run_summary.csv`](docs/assets/paper/run_summary.csv).
 
 ### C. Dataset
 
@@ -337,7 +316,10 @@ The corresponding W&B project is
 The shortest meaningful reproduction is the 50M-token local-conv ablation, which checks whether Simpson beats matched local-conv trapezoid:
 
 ```bash
+python -m venv .venv
 source .venv/bin/activate
+python -m pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+  -e '.[hpml-v100]' --no-build-isolation
 
 .venv/bin/python scripts/prepare_slimpajama.py \
   --output-dir data/slimpajama_500m_50m \
@@ -414,13 +396,13 @@ Per the HPML AI Use Policy, this submission discloses AI assistance.
 
 **Tool(s) used:** ChatGPT/Codex.
 
-**Specific purpose:** Drafted and completed this submission README from the existing project report, paper source, code, W&B run metadata, local logs, checkpoint metrics, and exported model READMEs.
+**Specific purpose:** Assisted with codebase navigation, README/LaTeX editing, summarizing existing repository artifacts, checking consistency against generated figures/tables, and identifying submission-compliance gaps in team-drafted material.
 
-**Sections affected:** `REAMDE.md` all sections.
+**Sections affected:** `README.md` organization, submission links, reproducibility instructions, results summary, and AI disclosure wording.
 
-**How we verified correctness:** The README values and paths were checked against `docs/hpml_simamba_report.md`, `docs/paper.tex`, `docs/assets/paper/run_summary.csv`, `outputs/*/best/metrics.json`, `run_logs/compression_eval_20260504.md`, launcher scripts, benchmark scripts, and Hugging Face export metadata. No new experimental numbers were generated for this README.
+**How we verified correctness:** The README values and paths were checked against `docs/hpml_simamba_report.md`, `docs/paper.tex`, `docs/assets/paper/run_summary.csv`, launcher scripts, benchmark scripts, profiler scripts, W&B dashboards, and Hugging Face export metadata. Final interpretations, performance reasoning, numerical claims, and scientific conclusions were validated by the team.
 
-By submitting this project, the team confirms that the analysis, interpretations, and conclusions are our own, and that any AI assistance is fully disclosed above. The same disclosure should appear in the final report appendix if required by CourseWorks.
+By submitting this project, the team confirms that the analysis, interpretations, and conclusions are our own, and that any AI assistance is fully disclosed above. The same disclosure block appears as an appendix in the final report.
 
 ### License
 
