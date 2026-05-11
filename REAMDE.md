@@ -11,7 +11,7 @@
 - **Team Name:** Simamba
 - **Members:**
   - Soumil Baldota (ssb2234) - Simamba implementation, training pipeline, W&B/checkpointing, experiments, and artifact generation
-  - Ansen Shia (as8008) - experiment design, analysis, report, and presentation
+  - Ansen Shia (as8008) - vLLM integration, experiment design, analysis, report, and presentation
   - David Zhang (dwz2107) - baselines, result analysis, report, and presentation
 
 ## Submission
@@ -48,7 +48,7 @@ This project evaluates whether a Simpson-style discretization can improve the SI
 
 ## 3. Final Results Summary
 
-Lower validation loss is better. The central result is negative but reproducible: the current Simpson parameterization trains stably, but it does not beat the matched trapezoid baseline or Mamba2.
+The central result is negative but reproducible: the current Simpson parameterization trains stably, but it does not beat the matched trapezoid baseline or Mamba2. While it does not yet outperform, the approach remains competitive across both long-run training and controlled ablations. Simpson variants also exhibit a distinct optimization profile, with slower convergence, larger gradient norms, and additional stabilization requirements such as coefficient offsets and midpoint control, suggesting that future potential work in parameterization or optimization may better realize the potential of higher-order recurrence methods.
 
 | Metric | Baseline | Simamba / Proposed Variant | Delta |
 | --- | ---: | ---: | ---: |
