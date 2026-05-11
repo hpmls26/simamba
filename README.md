@@ -123,6 +123,8 @@ The central result is negative but reproducible: the current Simpson parameteriz
 
 ### A. Environment Setup
 
+To preface, this project was forked from the Mamba repository, which uses a pyproject.toml based setup instead of a requirements.txt or environment.yml. We followed the same approach here.
+
 ```bash
 # Clone
 git clone git@github.com:hpmls26/simamba.git
