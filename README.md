@@ -11,20 +11,18 @@
 - **Team Name:** Simamba
 - **Members:**
   - Soumil Baldota (ssb2234) - Simamba implementation, training pipeline, W&B/checkpointing, experiments, and artifact generation
-  - Ansen Shia (as8008) - experiment design, analysis, report, and presentation
+  - Ansen Shia (as8008) - vLLM integration, experiment design, analysis, report, and presentation
   - David Zhang (dwz2107) - baselines, result analysis, report, and presentation
 
 ## Submission
 
 - **GitHub repository:** [https://github.com/hpmls26/simamba](https://github.com/hpmls26/simamba)
-- **Final report source:** [`docs/paper.tex`](docs/paper.tex) and extended experiment report [`docs/hpml_simamba_report.md`](docs/hpml_simamba_report.md)
-- **Final deliverables:** compiled report and presentation files under [`deliverables/`](deliverables/)
-- **Final presentation materials:** slide-ready figures and tables under [`docs/assets/paper/`](docs/assets/paper/)
+- **Final report source:** [`deliverables/HPML_Final_Report.pdf`](deliverablerables/HPML_Final_Report.pdf) and extended experiment report [`docs/hpml_simamba_report.md`](docs/hpml_simamba_report.md)
+- **Final presentation materials:** [`deliverables/HPML_Final_Presentation.pptx`](deliverablerables/HPML_Final_Presentation.pptx)
 - **Experiment-tracking dashboard:** [Weights & Biases project](https://wandb.ai/ssb2234-columbia/simamba)
 - **Exported checkpoints:** [Simamba midpoint 10M](https://huggingface.co/soumil1/simamba-midpoint-10m-slimpajama-500m) and [Mamba2 10M](https://huggingface.co/soumil1/mamba2-10m-slimpajama-500m)
 
-This workspace contains the report source, generated paper assets, reproducibility scripts, and the expected `deliverables/` location for the final compiled report and presentation submitted to CourseWorks.
-
+The final report PDF and the presentation file are checked into the `deliverables/` folder of this repository **and** uploaded to Courseworks.
 ---
 
 ## 1. Problem Statement
@@ -49,7 +47,7 @@ This project evaluates whether a Simpson-style discretization can improve the SI
 
 ## 3. Final Results Summary
 
-Lower validation loss is better. The central result is negative but reproducible: the current Simpson parameterization trains stably, but it does not beat the matched trapezoid baseline or Mamba2.
+The central result is negative but reproducible: the current Simpson parameterization trains stably, but it does not beat the matched trapezoid baseline or Mamba2. While it does not yet outperform, the approach remains competitive across both long-run training and controlled ablations. Simpson variants also exhibit a distinct optimization profile, with slower convergence, larger gradient norms, and additional stabilization requirements such as coefficient offsets and midpoint control, suggesting that future potential work in parameterization or optimization may better realize the potential of higher-order recurrence methods.
 
 | Metric | Baseline | Simamba / Proposed Variant | Delta |
 | --- | ---: | ---: | ---: |
@@ -74,14 +72,10 @@ Lower validation loss is better. The central result is negative but reproducible
 
 ```text
 .
-├── README.md                         # HPML submission README
-├── README_upstream_mamba.md          # Upstream Mamba README
+├── README.md                         # Upstream Mamba README
+├── REAMDE.md                         # HPML submission README
 ├── LICENSE                           # Apache-2.0
 ├── pyproject.toml / setup.py          # Package and optional dependency metadata
-├── requirements.txt                   # Pinned reported Python environment
-├── configs/                           # Reproduction configs for reported runs
-├── src/README.md                      # Source-location map for HPML packaging
-├── deliverables/                      # Final report/deck files for submission
 ├── docs/
 │   ├── paper.tex                      # Final paper source
 │   ├── hpml_simamba_report.md         # Extended run report used to complete this README
@@ -136,17 +130,17 @@ cd simamba
 # Create a clean Python environment
 python3.10 -m venv .venv
 source .venv/bin/activate
-python -m pip install -U pip
-python -m pip install -r requirements.txt
+python -m pip install -U pip wheel setuptools packaging ninja
 
-# Install this repo after the pinned runtime packages.
-python -m pip install -e . --no-build-isolation
+# Install CUDA-enabled PyTorch for your machine first, then install this repo.
+# The local run used torch 2.6.0+cu124.
+python -m pip install -e '.[train,triton,causal-conv1d]' --no-build-isolation
 
 # Optional, for Mamba-3 benchmark dependencies:
 python -m pip install -e '.[mamba3]' --no-build-isolation
 
-# Optional, if a platform-specific vLLM fork is needed for native Simamba:
-# install that fork after the base requirements.
+# Optional, for the profiling reproduction in section F:
+python -m pip install vllm matplotlib wandb
 ```
 
 **System requirements:** Python 3.10+, CUDA-capable NVIDIA GPU, and at least 16 GB GPU memory for the reported 10M-parameter V100 experiments. The original A6000 target was unavailable, so final numbers are from a single V100. On this V100/Triton 3.2 environment, the original Mamba-3 path requiring `triton.language.make_tensor_descriptor` did not run directly.
@@ -417,13 +411,13 @@ Per the HPML AI Use Policy, this submission discloses AI assistance.
 
 **Tool(s) used:** ChatGPT/Codex.
 
-**Specific purpose:** Codebase navigation, LaTeX/Markdown editing, summarizing repository artifacts, checking consistency against generated figures/tables, and identifying submission-compliance gaps in team-drafted material.
+**Specific purpose:** Drafted and completed this submission README from the existing project report, paper source, code, W&B run metadata, local logs, checkpoint metrics, and exported model READMEs.
 
-**Sections affected:** README/report wording and appendix organization.
+**Sections affected:** `REAMDE.md` all sections.
 
-**How we verified correctness:** The README values and paths were checked against `docs/hpml_simamba_report.md`, `docs/paper.tex`, `docs/assets/paper/run_summary.csv`, `outputs/*/best/metrics.json`, `run_logs/compression_eval_20260504.md`, launcher scripts, benchmark scripts, W&B logs, profiler exports, and Hugging Face export metadata. AI was not used to generate the profiling interpretations, performance reasoning, numerical analysis, or scientific conclusions.
+**How we verified correctness:** The README values and paths were checked against `docs/hpml_simamba_report.md`, `docs/paper.tex`, `docs/assets/paper/run_summary.csv`, `outputs/*/best/metrics.json`, `run_logs/compression_eval_20260504.md`, launcher scripts, benchmark scripts, and Hugging Face export metadata. No new experimental numbers were generated for this README.
 
-By submitting this project, the team confirms that the analysis, interpretations, and conclusions are our own, and that AI assistance is fully disclosed above.
+By submitting this project, the team confirms that the analysis, interpretations, and conclusions are our own, and that any AI assistance is fully disclosed above. The same disclosure should appear in the final report appendix if required by CourseWorks.
 
 ### License
 
