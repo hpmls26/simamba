@@ -1,442 +1,448 @@
-# Mamba
+# HPML Final Project: Simamba
 
-![Mamba](assets/selection.png "Selective State Space")
-> **Mamba: Linear-Time Sequence Modeling with Selective State Spaces**\
-> Albert Gu*, Tri Dao*\
-> Paper: https://arxiv.org/abs/2312.00752
+> **Course:** High Performance Machine Learning
+> **Semester:** Spring 2026
+> **Instructor:** Dr. Kaoutar El Maghraoui
 
-![Mamba-2](assets/ssd_algorithm.png "State Space Dual Model")
-> **Transformers are SSMs: Generalized Models and Efficient Algorithms**\
->     **Through Structured State Space Duality**\
-> Tri Dao*, Albert Gu*\
-> Paper: https://arxiv.org/abs/2405.21060
+---
 
-![Mamba-3](assets/mamba3.png "Inference-first State Space Model")
-> **Mamba-3: Improved Sequence Modeling using State Space Principles**\
->     **Through Structured State Space Duality**\
-> Aakash Lahoti*, Kevin Y. Li*, Berlin Chen*, Caitlin Wang*, Aviv Bick, J. Zico Kolter, Tri Dao†, Albert Gu†\
-> Paper: https://arxiv.org/abs/2603.15569
+## Team Information
 
-## About
+- **Team Name:** Simamba
+- **Members:**
+  - Soumil Baldota (ssb2234) - Simamba implementation, training pipeline, W&B/checkpointing, experiments, and artifact generation
+  - Ansen Shia (as8008) - experiment design, analysis, report, and presentation
+  - David Zhang (dwz2107) - baselines, result analysis, report, and presentation
 
-Mamba is a new state space model architecture showing promising performance on information-dense data such as language modeling, where previous subquadratic models fall short of Transformers.
-It is based on the line of progress on [structured state space models](https://github.com/state-spaces/s4),
-with an efficient hardware-aware design and implementation in the spirit of [FlashAttention](https://github.com/Dao-AILab/flash-attention).
+## Submission
 
-## Installation
+- **GitHub repository:** [https://github.com/hpmls26/simamba](https://github.com/hpmls26/simamba)
+- **Final report source:** [`docs/paper.tex`](docs/paper.tex) and extended experiment report [`docs/hpml_simamba_report.md`](docs/hpml_simamba_report.md)
+- **Final deliverables:** compiled report and presentation files under [`deliverables/`](deliverables/)
+- **Final presentation materials:** slide-ready figures and tables under [`docs/assets/paper/`](docs/assets/paper/)
+- **Experiment-tracking dashboard:** [Weights & Biases project](https://wandb.ai/ssb2234-columbia/simamba)
+- **Exported checkpoints:** [Simamba midpoint 10M](https://huggingface.co/soumil1/simamba-midpoint-10m-slimpajama-500m) and [Mamba2 10M](https://huggingface.co/soumil1/mamba2-10m-slimpajama-500m)
 
-Install PyTorch first, then:
-- `pip install mamba-ssm --no-build-isolation`: the core package with the common Python dependencies only.
-- `pip install mamba-ssm[causal-conv1d] --no-build-isolation`: core package plus optional `causal-conv1d`.
-- `pip install mamba-ssm[triton] --no-build-isolation`: core package plus Triton kernels.
-- `pip install mamba-ssm[mamba3] --no-build-isolation`: core package plus the extra dependencies required for Mamba-3 kernels.
-- `pip install mamba-ssm[full] --no-build-isolation`: install all optional runtime extras.
+This workspace contains the report source, generated paper assets, reproducibility scripts, and the expected `deliverables/` location for the final compiled report and presentation submitted to CourseWorks.
 
-`--no-build-isolation` is required so that pip uses your existing CUDA-enabled PyTorch instead of installing torch-cpu in an isolated build environment.
+---
 
-NOTE: To use Mamba-3, please install from source `MAMBA_FORCE_BUILD=TRUE pip install --no-cache-dir --force-reinstall git+https://github.com/state-spaces/mamba.git --no-build-isolation`.
+## 1. Problem Statement
 
-If you are packaging from a local checkout for environments like Google Colab, the base package can now be installed without requiring `triton`, `tilelang`, `quack-kernels`, or `causal-conv1d` up front. Those packages are imported only by the corresponding optional code paths.
+This project evaluates whether a Simpson-style discretization can improve the SISO state recurrence used by Mamba-3-style language-model mixers. The target workload is language-model training on SlimPajama, with supporting inference/kernel benchmarking to understand whether the new recurrence is practical. The main bottlenecks are optimization stability in recurrent SSM dynamics and GPU efficiency, especially prefill throughput and memory traffic in the current Simamba implementation.
 
-Other requirements:
-- Linux
-- NVIDIA GPU
-- PyTorch 1.12+
-- CUDA 11.6+
+---
 
-For AMD cards, see additional prerequisites below.
+## 2. Model/Application Description
 
-## Usage
+- **Model architecture:** `MambaLMHeadModel` with 10M-parameter Mamba-family mixers. The controlled shape is `d_model=160`, `n_layer=8`, `d_state=64`, `headdim=32`, `seq_len=128`, tied embeddings, RMSNorm, and a vocabulary size of 50,280.
+- **Proposed layer:** `Simamba`, a Mamba-3-inspired SISO mixer that replaces the width-2 trapezoid update with a width-3 Simpson-style recurrence. It supports `--simamba-discretization {simpson,trapezoid}`, midpoint control, coefficient logit offsets, and optional Mamba2-style local convolution over the `x/B/C` stream.
+- **Baselines:** Mamba2, matched Simamba trapezoid, Simamba Simpson default, Simamba Simpson low-control, Simamba midpoint, and local-conv variants.
+- **Framework:** PyTorch, Triton, `mamba_ssm`, Hugging Face `transformers`, W&B, NumPy memmaps, and optional `causal-conv1d`.
+- **Dataset:** `MBZUAI-LLM/SlimPajama-627B-DC`, streamed from Hugging Face and tokenized with `EleutherAI/gpt-neox-20b`. The dataset card reports an MIT license. Prepared subsets are `100M/10M` and `500M/50M` train/validation tokens.
+- **Custom layers/modifications:** `mamba_ssm/modules/simamba.py`, `mamba_ssm/ops/triton/simamba/`, checkpoint metadata/resume logic, fixed validation sampling, no-replacement epoch training sampling, compression evaluation, local-conv controls, and benchmark/figure generation.
+- **Hardware target:** Final controlled experiments ran on 1x NVIDIA Tesla V100-SXM2 16GB. The local validated environment was Linux, driver 550.90.07, CUDA 12.4, PyTorch 2.6.0+cu124, Triton 3.2.0, `transformers` 5.7.0, and `causal_conv1d` 1.6.0.
 
-We expose several levels of interface with the Mamba model.
+![Simamba architecture](docs/assets/paper/simamba_architecture.png)
 
-### Selective SSM
+---
 
-Mamba is based on a selective SSM layer, which is the focus of the paper (Section 3; Algorithm 2).
+## 3. Final Results Summary
 
-Source: [ops/selective_scan_interface.py](mamba_ssm/ops/selective_scan_interface.py).
+Lower validation loss is better. The central result is negative but reproducible: the current Simpson parameterization trains stably, but it does not beat the matched trapezoid baseline or Mamba2.
 
-### Mamba Block
+| Metric | Baseline | Simamba / Proposed Variant | Delta |
+| --- | ---: | ---: | ---: |
+| 500M-token best validation loss | Mamba2: 4.8625 | Simamba midpoint: 4.9178 | +0.0552 worse |
+| 500M-token matched trapezoid validation loss | Simamba trapezoid: 4.9326 | Simamba default Simpson: 4.9319 best, 4.9671 final | best roughly tied; final worse |
+| 50M-token matched discretization loss | Simamba trapezoid: 5.8195 | Simpson low-control: 5.8929 | +0.0734 worse |
+| 50M-token local-conv discretization loss | Local-conv trapezoid: 5.8469 | Local-conv Simpson low-control: 5.8793 | +0.0324 worse |
+| Training throughput, 500M tail median | Mamba2: 16,095 tok/s | Simamba midpoint: 12,594 tok/s | 21.7% lower |
+| Decode-step latency, B4/P1024/G256 | Mamba-3: 0.0160 ms | Simamba: 0.0173 ms | 1.08x slower |
+| Prefill latency, B4/P1024/G256 | Mamba-3: 0.8602 ms | Simamba: 353.3066 ms | 410.7x slower |
+| Prefill peak memory, B4/P1024/G256 | Mamba-3: 167.3911 MB | Simamba: 124.2363 MB | 25.8% lower |
+| Row-wise int8 QDQ loss delta | Mamba2: +0.0019 | Simamba midpoint: +0.0014 | both nearly lossless |
+| Exported model size on disk | Mamba2 HF export: 40 MB | Simamba HF export: 40 MB | roughly equal |
 
-The main module of this repository is the Mamba architecture block wrapping the selective SSM.
+**Hardware:** 1x NVIDIA Tesla V100-SXM2 16GB, CUDA 12.4, PyTorch 2.6.0+cu124, Triton 3.2.0, Debian Linux.
 
-Source: [modules/mamba_simple.py](mamba_ssm/modules/mamba_simple.py).
+**Headline result:** Simamba produced a stable, reproducible SSM training pipeline, but the current Simpson recurrence did not outperform trapezoid: at 50M tokens, matched trapezoid reached 5.8195 validation loss while the best Simpson control reached 5.8929, and kernel benchmarking showed decode overhead was small but prefill was not yet competitive.
 
-Usage:
-``` python
-import torch
-from mamba_ssm import Mamba
+---
 
-batch, length, dim = 2, 64, 16
-x = torch.randn(batch, length, dim).to("cuda")
-model = Mamba(
-    # This module uses roughly 3 * expand * d_model^2 parameters
-    d_model=dim, # Model dimension d_model
-    d_state=16,  # SSM state expansion factor
-    d_conv=4,    # Local convolution width
-    expand=2,    # Block expansion factor
-).to("cuda")
-y = model(x)
-assert y.shape == x.shape
+## 4. Repository Structure
+
+```text
+.
+├── README.md                         # HPML submission README
+├── README_upstream_mamba.md          # Upstream Mamba README
+├── LICENSE                           # Apache-2.0
+├── pyproject.toml / setup.py          # Package and optional dependency metadata
+├── requirements.txt                   # Pinned reported Python environment
+├── configs/                           # Reproduction configs for reported runs
+├── src/README.md                      # Source-location map for HPML packaging
+├── deliverables/                      # Final report/deck files for submission
+├── docs/
+│   ├── paper.tex                      # Final paper source
+│   ├── hpml_simamba_report.md         # Extended run report used to complete this README
+│   └── assets/paper/                  # Generated plots, CSV summaries, and architecture figure
+├── mamba_ssm/
+│   ├── modules/simamba.py             # Simamba mixer and local-conv/discretization controls
+│   ├── modules/mamba2.py              # Mamba2 compatibility fixes and d_conv controls
+│   └── ops/triton/simamba/            # Simamba SISO reference/Triton kernels
+├── scripts/
+│   ├── prepare_slimpajama.py          # Streaming tokenization into uint16 memmaps
+│   ├── train_simamba_lm.py            # Main LM training/eval/checkpoint loop
+│   ├── run_10m_discretization_comparison_500m.sh
+│   ├── run_followup_ablation_50m_after_current.sh
+│   ├── run_simamba_localconv_50m.sh
+│   ├── train_state_tracking.py
+│   ├── eval_checkpoint_compression.py
+│   ├── generate_hpml_paper_assets.py
+│   ├── convert_mamba2_checkpoint_to_vllm_hf.py
+│   └── push_best_simamba_to_hf.py
+├── benchmarks/
+│   ├── benchmark_simamba_siso.py
+│   ├── plot_simamba_benchmarks.py
+│   └── plots/
+├── profiling/
+│   ├── run_all_profiling.py            # One-command final profiling pipeline
+│   ├── nsys_kernel_profile.py          # Nsight Systems trace/export harness
+│   ├── ncu_kernel_profile.py           # Nsight Compute filtered-kernel harness
+│   ├── vllm_sweep.py                   # TTFT/TPOT/tok/s, GPU, prefill/decode profiling
+│   ├── vllm_combine_results.py         # Combined vLLM tables and matplotlib plot
+│   ├── kernel_correctness.py           # Triton-vs-PyTorch forward/backward checks
+│   ├── simamba/ and mamba3/            # Standalone SISO kernel profilers
+│   ├── test_kernel/                    # Improved fused Simamba prototype profiler
+│   └── results/                        # Local profiling traces, CSVs, and plots
+├── data/                              # Local prepared SlimPajama memmaps
+├── outputs/                           # Local training checkpoints and metrics
+├── hf_exports/                        # Local Hugging Face export directories
+├── run_logs/                          # JSONL-style logs and evaluation summaries
+└── wandb/                             # Local W&B run files
 ```
 
-### Mamba-2
+---
 
-The Mamba-2 block is implemented at [modules/mamba2.py](mamba_ssm/modules/mamba2.py).
+## 5. Reproducibility Instructions
 
-A simpler version is at [modules/mamba2_simple.py](mamba_ssm/modules/mamba2_simple.py)
+### A. Environment Setup
 
-The usage is similar to Mamba(-1):
-``` python
-from mamba_ssm import Mamba2
-model = Mamba2(
-    # This module uses roughly 3 * expand * d_model^2 parameters
-    d_model=dim, # Model dimension d_model
-    d_state=64,  # SSM state expansion factor, typically 64 or 128
-    d_conv=4,    # Local convolution width
-    expand=2,    # Block expansion factor
-).to("cuda")
-y = model(x)
-assert y.shape == x.shape
+```bash
+# Clone
+git clone git@github.com:hpmls26/simamba.git
+cd simamba
+
+# Create a clean Python environment
+python3.10 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -r requirements.txt
+
+# Install this repo after the pinned runtime packages.
+python -m pip install -e . --no-build-isolation
+
+# Optional, for Mamba-3 benchmark dependencies:
+python -m pip install -e '.[mamba3]' --no-build-isolation
+
+# Optional, if a platform-specific vLLM fork is needed for native Simamba:
+# install that fork after the base requirements.
 ```
 
-#### SSD
+**System requirements:** Python 3.10+, CUDA-capable NVIDIA GPU, and at least 16 GB GPU memory for the reported 10M-parameter V100 experiments. The original A6000 target was unavailable, so final numbers are from a single V100. On this V100/Triton 3.2 environment, the original Mamba-3 path requiring `triton.language.make_tensor_descriptor` did not run directly.
 
-A minimal version of the inner SSD module (Listing 1 from the Mamba-2 paper) with conversion between "discrete" and "continuous" SSM versions
-is at [modules/ssd_minimal.py](mamba_ssm/modules/ssd_minimal.py).
+The profiling commands additionally require `nvidia-smi`, Nsight Systems
+(`nsys`), and Nsight Compute (`ncu`) on the machine running the traces. By
+default the profiler looks for the Nsight CLIs under `/usr/local/cuda/bin`;
+pass `--nsys-bin` or `--ncu-bin` if they are installed elsewhere.
 
-### Mamba-3
+### B. Experiment Tracking Dashboard
 
-The Mamba-3 block is implemented at [modules/mamba3.py](mamba_ssm/modules/mamba3.py).
+Public experiment tracking is under:
 
-The usage is as follows:
-``` python
-from mamba_ssm import Mamba3
-batch, length, dim = 2, 2048, 768
-x = torch.randn(batch, length, dim).to(torch.bfloat16).to("cuda")
-model = Mamba3(
-    # This module uses roughly 6 * d_model^2 parameters
-    d_model=dim, # Model dimension d_model
-    d_state=128,  # SSM state size
-    headdim=64, # SSM headdim
-    is_mimo=True, # Use MIMO mode
-    mimo_rank=4, # MIMO rank when is_mimo=True
-    chunk_size=16, # 64/mimo_rank if x is in bf16, else 32/mimo_rank
-    is_outproj_norm=False, # Additional post SSM norm
-    dtype=torch.bfloat16,
-).to("cuda")
-y = model(x)
-assert y.shape == x.shape
+> **Dashboard:** [https://wandb.ai/ssb2234-columbia/simamba](https://wandb.ai/ssb2234-columbia/simamba)
+>
+> **Platform used:** Weights & Biases
+
+Key W&B runs:
+
+| Run | Link |
+| --- | --- |
+| Mamba2 500M+500M | https://wandb.ai/ssb2234-columbia/simamba/runs/dm74y180 |
+| Simamba Simpson 500M+500M | https://wandb.ai/ssb2234-columbia/simamba/runs/wu8bhcqa |
+| Simamba midpoint 500M+500M | https://wandb.ai/ssb2234-columbia/simamba/runs/juxcboyg |
+| Simamba trapezoid 500M | https://wandb.ai/ssb2234-columbia/simamba/runs/0rjsv3c1 |
+| 50M trapezoid | https://wandb.ai/ssb2234-columbia/simamba/runs/jgjlc1sr |
+| 50M Simpson default | https://wandb.ai/ssb2234-columbia/simamba/runs/9yuk3voc |
+| 50M Simpson low-control | https://wandb.ai/ssb2234-columbia/simamba/runs/bouk7ayj |
+| Local-conv trapezoid | https://wandb.ai/ssb2234-columbia/simamba/runs/03okzay6 |
+| Local-conv Simpson default | https://wandb.ai/ssb2234-columbia/simamba/runs/eglr4x75 |
+| Local-conv Simpson low-control | https://wandb.ai/ssb2234-columbia/simamba/runs/w6u32odi |
+
+Local W&B-derived summaries are committed/generated under [`docs/assets/paper/run_summary.csv`](docs/assets/paper/run_summary.csv), [`docs/assets/paper/run_events.csv`](docs/assets/paper/run_events.csv), and [`docs/assets/paper/wandb_local_history.csv`](docs/assets/paper/wandb_local_history.csv).
+
+### C. Dataset
+
+Prepare the main 500M/50M SlimPajama split:
+
+```bash
+.venv/bin/python scripts/prepare_slimpajama.py \
+  --output-dir data/slimpajama_500m_50m \
+  --train-tokens 500000000 \
+  --val-tokens 50000000 \
+  --seed 1337 \
+  --shuffle-buffer 100000
 ```
 
-### Mamba Language Model
+Prepare the smaller 100M/10M split:
 
-Finally, we provide an example of a complete language model: a deep sequence model backbone (with repeating Mamba blocks) + language model head.
-
-Source: [models/mixer_seq_simple.py](mamba_ssm/models/mixer_seq_simple.py).
-
-This is an example of how to integrate Mamba into an end-to-end neural network.
-This example is used in the generation scripts below.
-
-
-## Pretrained Models
-
-Pretrained models are uploaded to
-[Hugging Face](https://huggingface.co/state-spaces): `mamba-130m`, `mamba-370m`,
-`mamba-790m`, `mamba-1.4b`, `mamba-2.8b`, `mamba2-130m`, `mamba2-370m`,
-`mamba2-780m`, `mamba2-1.3b`, `mamba2-2.7b`, `transformerpp-2.7b`, `mamba2attn-2.7b`, trained on 300B tokens on the Pile, as well as `mamba-2.8b-slimpj`
-(trained on 600B tokens on the SlimPajama dataset).
-
-
-The models will be autodownloaded by the generation script below.
-
-These models were trained on the [Pile](https://huggingface.co/datasets/EleutherAI/pile), and follow the standard model dimensions described by GPT-3 and followed by many open source models:
-
-| Parameters | Layers | Model dim. | 
-|------------|--------|------------|
-| 130M       | 24     | 768        |
-| 370M       | 48     | 1024       |
-| 790M       | 48     | 1536       |
-| 1.4B       | 48     | 2048       |
-| 2.8B       | 64     | 2560       |
-
-(The layer count of Mamba doubles that of a Transformer with similar size, as two Mamba blocks are needed for each "layer" (MHA block + MLP block) of a Transformer.)
-
-Note: these are base models trained only for 300B tokens, without any form of downstream modification (instruction tuning, etc.).
-Performance is expected to be comparable or better than other architectures trained on similar data, but not to match larger or fine-tuned models.
-
-
-## Evaluations
-
-To run zero-shot evaluations of models (corresponding to Table 3 of the paper),
-we use the
-[lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
-library.
-
-1. Install `lm-evaluation-harness` by `pip install lm-eval==0.4.2`.
-2. Run evaluation with (more documentation at the [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness/tree/big-refactor) repo):
-``` sh
-lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba-130m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
-python evals/lm_harness_eval.py --model hf --model_args pretrained=EleutherAI/pythia-160m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande --device cuda --batch_size 64
+```bash
+.venv/bin/python scripts/prepare_slimpajama.py \
+  --output-dir data/slimpajama_100m_10m \
+  --train-tokens 100000000 \
+  --val-tokens 10000000 \
+  --seed 1337 \
+  --shuffle-buffer 100000
 ```
 
-To reproduce the results on the `mamba-2.8b-slimpj` model reported in the blogposts:
-``` sh
-lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks boolq,piqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa,race,truthfulqa_mc2 --device cuda --batch_size 256
-lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks mmlu --num_fewshot 5 --device cuda --batch_size 256
+The prepared local `500M/50M` metadata is:
+
+| Split | Tokens | Documents | Path |
+| --- | ---: | ---: | --- |
+| Train | 500,000,000 | 691,532 | `data/slimpajama_500m_50m/train.bin` |
+| Validation | 50,000,000 | 49,451 | `data/slimpajama_500m_50m/val.bin` |
+
+Token IDs are stored as `uint16` memmaps and are read without loading the full arrays into RAM.
+
+### D. Training
+
+Run the main 500M-token comparison:
+
+```bash
+STAMP=repro_500m \
+WANDB_PROJECT=simamba \
+WANDB_ENTITY=ssb2234-columbia \
+bash scripts/run_10m_discretization_comparison_500m.sh
 ```
 
-To run evaluations on Mamba-2 models, simply replace the model names:
-``` sh
-lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba2-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
-lm_eval --model mamba_ssm --model_args pretrained=state-spaces/transformerpp-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
-lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba2attn-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
+Continue the main runs and launch the matched 500M trapezoid run:
+
+```bash
+STAMP=repro_continue_plus_trap \
+WANDB_PROJECT=simamba \
+WANDB_ENTITY=ssb2234-columbia \
+bash scripts/run_10m_continue_plus_trap_500m.sh
 ```
 
-Note that the result of each task might differ from reported values by 0.1-0.3 due to noise in the evaluation process.
+Run the 50M-token matched Simpson/trapezoid ablation:
 
-## Inference
-
-The script [benchmarks/benchmark_generation_mamba_simple.py](benchmarks/benchmark_generation_mamba_simple.py)
-1. autoloads a model from the Hugging Face Hub,
-2. generates completions of a user-specified prompt,
-3. benchmarks the inference speed of this generation.
-
-Other configurable options include the top-p (nucleus sampling) probability, and the softmax temperature.
-
-### Examples
-
-To test generation latency (e.g. batch size = 1) with different sampling strategies:
-
-``` sh
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --minp 0.05 --topk 0 --temperature 0.7 --repetition-penalty 1.2
+```bash
+STAMP=repro_followup_50m \
+WAIT_PIDS="" \
+WANDB_PROJECT=simamba \
+WANDB_ENTITY=ssb2234-columbia \
+bash scripts/run_followup_ablation_50m_after_current.sh
 ```
 
-To test generation throughput with random prompts (e.g. large batch size):
-``` sh
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --batch 64
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --batch 64
+Run the local-convolution Simamba ablation:
+
+```bash
+STAMP=repro_localconv_dconv4_50m \
+WANDB_PROJECT=simamba \
+WANDB_ENTITY=ssb2234-columbia \
+bash scripts/run_simamba_localconv_50m.sh
 ```
 
-With Mamba-2, you just need to change the model name:
-``` sh
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba2-2.7b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
+These launcher scripts start background jobs and write logs to `run_logs/` and checkpoints to `outputs/`. Set `WANDB_API_KEY` in the environment before running with W&B enabled.
+
+### E. Evaluation
+
+Recompute fixed-validation losses for checkpoints using the same validation sampling used in the compression study:
+
+```bash
+.venv/bin/python scripts/eval_checkpoint_compression.py \
+  --checkpoint mamba2_500m=outputs/disc10m_mamba2_fp32_500m_20260502_185217/best/trainer.pt \
+  --checkpoint simamba_midpoint_500m=outputs/disc10m_simamba_midpoint_fp32_500m_20260502_190333/best/trainer.pt \
+  --checkpoint simamba_trapezoid_500m=outputs/disc10m_simamba_trapezoid_vec_500m_20260503_0609_trap_vec/best/trainer.pt \
+  --variants baseline \
+  --output run_logs/reproduce_baseline_eval.jsonl
 ```
 
+Run the full compression/pruning perturbation evaluation:
 
-## Profiling
+```bash
+.venv/bin/python scripts/eval_checkpoint_compression.py \
+  --checkpoint mamba2_500m=outputs/disc10m_mamba2_fp32_500m_20260502_185217/best/trainer.pt \
+  --checkpoint simamba_midpoint_500m=outputs/disc10m_simamba_midpoint_fp32_500m_20260502_190333/best/trainer.pt \
+  --checkpoint simamba_trapezoid_500m=outputs/disc10m_simamba_trapezoid_vec_500m_20260503_0609_trap_vec/best/trainer.pt \
+  --output run_logs/compression_eval_reproduce.jsonl
+```
 
-The profiling orchestrator regenerates the kernel and vLLM artifacts used for
-the Simamba report. It runs NSYS, NCU, and correctness for `mamba3`, `simamba`,
-and `improved` kernels, then runs the vLLM TTFT/TPOT/tok/s sweep for Mamba2
-and the improved Simamba export. Profiling logs to W&B project `profiling`;
-training logs still use `simamba`.
+Regenerate the final paper plots and CSV summaries:
+
+```bash
+.venv/bin/python scripts/generate_hpml_paper_assets.py
+```
+
+### F. Profiling
+
+To regenerate all profiling artifacts, run the orchestrator from the repository
+root on a CUDA machine with Nsight Systems, Nsight Compute, vLLM, `nvidia-smi`,
+and W&B credentials available:
 
 ```bash
 python profiling/run_all_profiling.py --wandb
 ```
 
-Use `--dry-run` to print the underlying commands or `--steps` to run a subset,
-for example `--steps kernel-nsys,kernel-correctness,vllm`. If Nsight Compute
-reports `ERR_NVGPUCTRPERM`, rerun with `--sudo-ncu` on machines where sudo is
-configured for NCU. Outputs are written under `profiling/results/`, including
-kernel-suite CSV exports, correctness tables/plots, and vLLM comparison plots.
-Full reproducibility details are in [`REAMDE.md`](REAMDE.md#f-profiling), and
-profiler usage is in [`profiling/README.md`](profiling/README.md).
+The script runs:
 
+- NSYS traces for the `mamba3`, `simamba`, and `improved` SISO kernel targets.
+- NCU filtered-kernel profiles for the Mamba3, Simamba, and improved kernels.
+- Triton-vs-PyTorch correctness tables and a correctness error plot.
+- vLLM repeated measurements for `soumil1/mamba2-10m-slimpajama-500m` and the improved Simamba export.
+- A combined vLLM CSV/plot plus a W&B artifact bundle.
 
-## Troubleshooting
+Profiling logs to W&B project `profiling`; training logs still use `simamba`.
+Use `--dry-run` to print the underlying commands, `--steps` to run a subset
+such as `--steps kernel-nsys,kernel-correctness,vllm`, and `--sudo-ncu` if NCU
+fails with `ERR_NVGPUCTRPERM` on a machine where sudo is configured.
 
-### Precision
-Our models were trained using PyTorch [AMP](https://pytorch.org/docs/stable/amp.html) for mixed precision. AMP keeps model parameters in float32 and casts to half precision when necessary.
-On the other hand, other frameworks like DeepSpeed store parameters in float16 and upcasts when necessary (e.g. for optimizer accumulation).
+The main regenerated artifacts are:
 
-We've observed that higher precision for the main model parameters may be necessary, because SSMs are sensitive to their recurrent dynamics. If you are experiencing instabilities,
-as a first step please try a framework storing parameters in fp32 (such as AMP).
+- `profiling/results/kernel_suite/nsys/*.nsys-rep`
+- `profiling/results/kernel_suite/nsys/csv_exports/*.csv`
+- `profiling/results/kernel_suite/ncu/*.csv`
+- `profiling/results/kernel_suite/ncu/*_details.txt`
+- `profiling/results/kernel_suite/kernel_correctness.csv`
+- `profiling/results/kernel_suite/kernel_correctness.md`
+- `profiling/results/kernel_suite/kernel_correctness.png`
+- `profiling/results/vllm_mamba2_summary.csv`
+- `profiling/results/vllm_mamba2_raw.csv`
+- `profiling/results/vllm_mamba2.png`
+- `profiling/results/vllm_improved_simamba_summary.csv`
+- `profiling/results/vllm_improved_simamba_raw.csv`
+- `profiling/results/vllm_improved_simamba.png`
+- `profiling/results/vllm_mamba2_vs_improved_summary.csv`
+- `profiling/results/vllm_mamba2_vs_improved_raw.csv`
+- `profiling/results/vllm_mamba2_vs_improved.png`
 
-### Initialization
-Some parts of the model have initializations inherited from prior work on S4 models.
-For [example](https://github.com/state-spaces/mamba/blob/f0affcf69f06d1d06cef018ff640bf080a11c421/mamba_ssm/modules/mamba_simple.py#L102), the $\Delta$ parameter has a targeted range by initializing the bias of its linear projection.
-However, some frameworks may have post-initialization hooks (e.g. setting all bias terms in `nn.Linear` modules to zero).
-If this is the case, you may have to add custom logic (e.g. this [line](https://github.com/state-spaces/mamba/blob/f0affcf69f06d1d06cef018ff640bf080a11c421/mamba_ssm/modules/mamba_simple.py#L104) turns off re-initializing in our trainer, but would be a no-op in any other framework)
-that is specific to the training framework.
+The vLLM summaries include TTFT, TPOT, tok/s, decode-loop tok/s, prefill-probe
+latency, requests/s, GPU memory peak/delta, model-load memory delta, prefix
+caching on/off, and 512-token repeated-prefix prompts. Open `.nsys-rep` files
+in Nsight Systems, inspect NCU CSVs for per-kernel counters, and use the PNGs
+as report-ready matplotlib figures.
 
-## Additional Prerequisites for AMD cards
+The corresponding W&B project is
+[`ssb2234-columbia/profiling`](https://wandb.ai/ssb2234-columbia/profiling).
 
-### Patching ROCm
+### G. Quickstart: Reproduce the Headline Result
 
-If you are on ROCm 6.0, run the following steps to avoid errors during compilation. This is not required for ROCm 6.1 onwards.
+The shortest meaningful reproduction is the 50M-token local-conv ablation, which checks whether Simpson beats matched local-conv trapezoid:
 
-1. Locate your ROCm installation directory. This is typically found at `/opt/rocm/`, but may vary depending on your installation.
+```bash
+source .venv/bin/activate
 
-2. Apply the Patch. Run with `sudo` in case you encounter permission issues.
-   ```bash
-    patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h < rocm_patch/rocm6_0.patch 
-   ```
+.venv/bin/python scripts/prepare_slimpajama.py \
+  --output-dir data/slimpajama_500m_50m \
+  --train-tokens 500000000 \
+  --val-tokens 50000000 \
+  --seed 1337 \
+  --shuffle-buffer 100000
 
-
-## Citation
-
-If you use this codebase, or otherwise find our work valuable, please cite Mamba:
+STAMP=repro_localconv_dconv4_50m \
+WANDB_PROJECT=simamba \
+WANDB_ENTITY=ssb2234-columbia \
+bash scripts/run_simamba_localconv_50m.sh
 ```
-@article{mamba,
-  title={Mamba: Linear-Time Sequence Modeling with Selective State Spaces},
-  author={Gu, Albert and Dao, Tri},
-  journal={arXiv preprint arXiv:2312.00752},
-  year={2023}
+
+After the three background jobs finish, inspect:
+
+```bash
+outputs/disc10m_simamba_localconv_trapezoid_50m_repro_localconv_dconv4_50m/best/metrics.json
+outputs/disc10m_simamba_localconv_simpson_lowctrl_50m_repro_localconv_dconv4_50m/best/metrics.json
+outputs/disc10m_simamba_localconv_simpson_50m_repro_localconv_dconv4_50m/best/metrics.json
+```
+
+The reported result from the completed run is trapezoid `5.8469`, Simpson low-control `5.8793`, and Simpson default `5.8890`.
+
+---
+
+## 6. Results and Observations
+
+- **The stable fp32 pipeline worked.** After switching to fp32 parameter storage, cosine decay, fixed validation spans, nonfinite-step handling, and reliable checkpoint metadata, the controlled runs completed with zero nonfinite skips.
+- **The current Simpson recurrence is not quality-positive.** The best 500M Simamba checkpoint was midpoint Simpson at validation loss `4.9178`, behind Mamba2 at `4.8625`; at 50M tokens, matched trapezoid beat both Simpson variants.
+- **The negative lag-2 Simpson correction is the likely optimization issue.** Lowering the Simpson control offset from default to `-4.0` improved validation from `5.9178` to `5.8929`, but still did not catch trapezoid.
+- **Mamba2 is not a clean discretization baseline.** Mamba2 includes causal local convolution over `x/B/C`; shrinking/removing it hurt Mamba2, so Simamba needed matched local mixing for a fairer comparison.
+- **Local mixing helped but did not flip the result.** With `--simamba-d-conv 4`, local-conv trapezoid reached `5.8469`, while local-conv Simpson low-control reached `5.8793`.
+- **Systems performance needs kernel work.** Decode-step overhead is near Mamba-3, but Simamba prefill is hundreds of times slower in the current benchmark path.
+
+![Best validation loss summary](docs/assets/paper/summary_best_val_loss.png)
+
+![500M validation loss curves](docs/assets/paper/wandb_main_500m_val_loss.png)
+
+![Local mixing validation loss curves](docs/assets/paper/wandb_localmix_val_loss.png)
+
+![SISO benchmark latency](docs/assets/paper/simamba_latency.png)
+
+---
+
+## 7. Notes
+
+- Source changes live mainly under `mamba_ssm/`, `scripts/`, and `benchmarks/`.
+- Trained checkpoints are stored locally under `outputs/`, with portable exports under `hf_exports/`.
+- The best exported checkpoints are also available on Hugging Face:
+  - `soumil1/simamba-midpoint-10m-slimpajama-500m`
+  - `soumil1/mamba2-10m-slimpajama-500m`
+  - `soumil1/mamba2-10m-slimpajama-500m-vllm`
+- W&B credentials should be supplied through `WANDB_API_KEY`. Do not commit API keys or private tokens.
+- The Simamba Hugging Face export uses custom remote code; serving through vLLM requires the Transformers backend:
+
+```bash
+PYTHONPATH=/path/to/simamba \
+vllm serve soumil1/simamba-midpoint-10m-slimpajama-500m \
+  --trust-remote-code \
+  --model-impl transformers \
+  --dtype float32 \
+  --max-model-len 128
+```
+
+### AI Use Disclosure
+
+Per the HPML AI Use Policy, this submission discloses AI assistance.
+
+**Did your team use any AI tool in completing this project?**
+
+- [ ] No, we did not use any AI tool.
+- [x] Yes, we used AI assistance as described below.
+
+**Tool(s) used:** ChatGPT/Codex.
+
+**Specific purpose:** Codebase navigation, LaTeX/Markdown editing, summarizing repository artifacts, checking consistency against generated figures/tables, and identifying submission-compliance gaps in team-drafted material.
+
+**Sections affected:** README/report wording and appendix organization.
+
+**How we verified correctness:** The README values and paths were checked against `docs/hpml_simamba_report.md`, `docs/paper.tex`, `docs/assets/paper/run_summary.csv`, `outputs/*/best/metrics.json`, `run_logs/compression_eval_20260504.md`, launcher scripts, benchmark scripts, W&B logs, profiler exports, and Hugging Face export metadata. AI was not used to generate the profiling interpretations, performance reasoning, numerical analysis, or scientific conclusions.
+
+By submitting this project, the team confirms that the analysis, interpretations, and conclusions are our own, and that AI assistance is fully disclosed above.
+
+### License
+
+Released under the Apache License 2.0. See [`LICENSE`](LICENSE). This project builds on the upstream Mamba SSM repository by Tri Dao and Albert Gu.
+
+### Citation
+
+If you build on this work, please cite:
+
+```bibtex
+@misc{baldota2026simamba,
+  title  = {Simamba: Evaluating Simpson-Style Discretization for Mamba-3 State Space Language Models},
+  author = {Baldota, Soumil and Shia, Ansen and Zhang, David},
+  year   = {2026},
+  note   = {HPML Spring 2026 Final Project, Columbia University},
+  url    = {https://github.com/hpmls26/simamba}
 }
-
-@inproceedings{mamba2,
-  title={Transformers are {SSM}s: Generalized Models and Efficient Algorithms Through Structured State Space Duality},
-  author={Dao, Tri and Gu, Albert},
-  booktitle={International Conference on Machine Learning (ICML)},
-  year={2024}
-}
-
-@misc{lahoti2026mamba3improvedsequencemodeling,
-      title={Mamba-3: Improved Sequence Modeling using State Space Principles}, 
-      author={Aakash Lahoti and Kevin Y. Li and Berlin Chen and Caitlin Wang and Aviv Bick and J. Zico Kolter and Tri Dao and Albert Gu},
-      year={2026},
-      eprint={2603.15569},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2603.15569}, 
-}
 ```
 
+### Contact
 
-###
-
-1. Start a CPU job to prepare the bounded SlimPajama sample
-
-  mkdir -p /insomnia001/home/ssb2234/logs
-  cd /insomnia001/home/ssb2234/mamba
-  sbatch scripts/prepare_slimpajama_smoke.sh
-
-  Watch logs:
-
-  tail -f /insomnia001/home/ssb2234/logs/SlimPajamaPrepSmoke-<jobid>.out
-  tail -f /insomnia001/home/ssb2234/logs/SlimPajamaPrepSmoke-<jobid>.err
-
-  This writes:
-
-  - /insomnia001/home/ssb2234/slimpajama_smoke/train.bin
-  - /insomnia001/home/ssb2234/slimpajama_smoke/val.bin
-  - /insomnia001/home/ssb2234/slimpajama_smoke/meta.json
-
-  If datasets is missing or outdated in the venv, do this once before submitting:
-
-  cd /insomnia001/home/ssb2234/mamba
-  source .venv/bin/activate
-  pip install -U datasets huggingface_hub hf-xet tqdm
-
-  2. After dataset prep finishes, submit the smoke comparison job
-
-  cd /insomnia001/home/ssb2234/mamba
-  sbatch scripts/run_compare_smoke_a6000.sh
-
-  Watch logs:
-
-  tail -f /insomnia001/home/ssb2234/logs/SimambaSmokeCompare-<jobid>.out
-  tail -f /insomnia001/home/ssb2234/logs/SimambaSmokeCompare-<jobid>.err
-
-  This runs sequential smoke tests for:
-
-  - Simamba
-  - Mamba2
-  - Mamba3
-
-  and writes outputs under:
-
-  - /insomnia001/home/ssb2234/simamba_compare_smoke
-
-  3. Make sure W&B env is available in the batch environment
-  Because batch jobs don’t always inherit shell state the way you expect, either:
-
-  - export the vars before sbatch, if your cluster propagates them
-  - or put them in the script itself, which you said you already did for the training launcher
-
-  The minimal required vars are:
-
-  export WANDB_API_KEY='...'
-  export WANDB_ENTITY='ssb2234-columbia'
-  export WANDB_PROJECT='simamba'
-
-  If you want to pass them explicitly when submitting:
-
-  export WANDB_API_KEY='...'
-  export WANDB_ENTITY='ssb2234-columbia'
-  export WANDB_PROJECT='simamba'
-  sbatch --export=ALL scripts/run_compare_smoke_a6000.sh
-
-  4. If you want to run the prep interactively instead of through sbatch
-
-  srun --pty -p short -c 2 --mem-per-cpu=4G -t 0-02:00 -A edu /bin/bash
-  cd /insomnia001/home/ssb2234/mamba
-  source .venv/bin/activate
-  bash scripts/prepare_slimpajama_smoke.sh
-
-  5. If you want to run the comparison interactively instead of through sbatch
-
-  srun --pty -p short --gres=gpu:1 -c 4 --mem-per-cpu=8G -t 0-06:00 -A edu /bin/bash
-  cd /insomnia001/home/ssb2234/mamba
-  source .venv/bin/activate
-  export WANDB_API_KEY='...'
-  export WANDB_ENTITY='ssb2234-columbia'
-  export WANDB_PROJECT='simamba'
-  bash scripts/run_compare_smoke_a6000.sh
-
-  Expected order
-
-  1. sbatch scripts/prepare_slimpajama_smoke.sh
-  2. wait for train.bin and val.bin
-  3. sbatch scripts/run_compare_smoke_a6000.sh
-
-  If you want, I can also give you a single copy-paste block that submits prep first, waits for it, then submits the
-  GPU smoke run
-  automatically.
-
-## 130M training with async GCS checkpoint export
-
-The long-running launcher is:
-
-```bash
-scripts/run_train_simamba_130m.sh
-```
-
-It now validates that the visible GPUs match `A6000`, writes W&B scratch files under the training output directory instead of the repo root, and saves model-only milestone checkpoints every 25 steps for asynchronous export.
-At `SEQ_LEN=2048`, it defaults to `MICRO_BATCH_SIZE=1` and keeps `GLOBAL_BATCH_SIZE=32` via gradient accumulation because the current Simamba backward path is activation-heavy and can OOM with a local microbatch of 4 on 48 GiB A6000 GPUs.
-
-Before submitting, make sure these variables are available in the batch environment:
-
-```bash
-export WANDB_API_KEY='...'
-export WANDB_ENTITY='ssb2234-columbia'
-export WANDB_PROJECT='simamba'
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json  # if needed
-export GCS_BUCKET=<bucket-name>
-```
-
-Then submit:
-
-```bash
-sbatch --export=ALL scripts/run_train_simamba_130m.sh /path/train.bin /path/val.bin /path/output_dir
-```
-
-If you want to override the default batch shape, do it explicitly in the submit environment. For example:
-
-```bash
-MICRO_BATCH_SIZE=1 GLOBAL_BATCH_SIZE=32 sbatch --export=ALL scripts/run_train_simamba_130m.sh /path/train.bin /path/val.bin /path/output_dir
-```
-
-Notes:
-
-- The async exporter uploads `step_*` milestone archives to `GCS_PREFIX/GCS_RUN_PREFIX/checkpoints` in the configured bucket.
-- `GCS_RUN_PREFIX` defaults to `$(basename OUTPUT_DIR)` and can be overridden explicitly.
-- `GCS_PREFIX` is optional and lets you place runs under a shared object prefix.
-- If `OUTPUT_DIR/latest/trainer.pt` is missing at startup and `GCS_RESTORE_IF_MISSING=1`, the launcher synchronously restores the newest uploaded `step_*.tar` milestone from GCS into `OUTPUT_DIR/latest` before training starts.
-- That remote restore brings back model weights and step number, but not optimizer state, because exported `step_*` milestones are model-only.
-- The uploader uses resumable GCS session URIs and persists session state locally so interrupted uploads can continue without restarting the whole archive transfer.
-- If you need to disable remote export for a one-off run, set `GCS_EXPORT=0`.
+Open a GitHub issue or contact the team at `ssb2234@columbia.edu`, `as8008@columbia.edu`, or `dwz2107@columbia.edu`.
